@@ -1,0 +1,59 @@
+[
+  {
+    "service": "AWS/S3",
+    "cname": ["s3.amazonaws.com", "s3-website"],
+    "fingerprint": "The specified bucket does not exist",
+    "nxdomain": false,
+    "status": "Vulnerable",
+    "discussion": "https://github.com/EdOverflow/can-i-take-over-xyz/issues/36"
+  },
+  {
+    "service": "GitHub Pages",
+    "cname": ["github.io"],
+    "fingerprint": "There isn't a GitHub Pages site here.",
+    "nxdomain": false,
+    "status": "Vulnerable",
+    "discussion": "https://github.com/EdOverflow/can-i-take-over-xyz/issues/37"
+  },
+  {
+    "service": "Bitbucket",
+    "cname": ["bitbucket.io"],
+    "fingerprint": "Repository not found",
+    "nxdomain": false,
+    "status": "Vulnerable",
+    "discussion": "https://github.com/EdOverflow/can-i-take-over-xyz/issues/77"
+  },
+  {
+    "service": "Pantheon",
+    "cname": ["pantheonsite.io"],
+    "fingerprint": "The gods are wise, but do not know of the site which you seek.",
+    "nxdomain": false,
+    "status": "Vulnerable",
+    "discussion": "https://github.com/EdOverflow/can-i-take-over-xyz/issues/24"
+  },
+  {
+    "service": "Tilda",
+    "cname": ["tilda.ws"],
+    "fingerprint": "Please renew your subscription",
+    "nxdomain": false,
+    "status": "Vulnerable",
+    "discussion": "https://github.com/EdOverflow/can-i-take-over-xyz/issues/170"
+  },
+  {
+    "service": "Microsoft Azure",
+    "cname": [
+      "azurewebsites.net",
+      "cloudapp.net",
+      "cloudapp.azure.com",
+      "trafficmanager.net",
+      "blob.core.windows.net",
+      "azure-api.net",
+      "azurehdinsight.net",
+      "azureedge.net"
+    ],
+    "fingerprint": "",
+    "nxdomain": true,
+    "status": "Vulnerable",
+    "discussion": "https://github.com/EdOverflow/can-i-take-over-xyz/issues/35"
+  }
+]

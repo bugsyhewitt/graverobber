@@ -1,0 +1,307 @@
+package detectors
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/bugsyhewitt/graverobber/pkg/finding"
+	"github.com/bugsyhewitt/graverobber/pkg/fingerprints"
+	"github.com/bugsyhewitt/graverobber/pkg/resolver"
+)
+
+// ---- fingerprint DB helpers ------------------------------------------------
+
+func mustDB(t *testing.T, raw string) *fingerprints.DB {
+	t.Helper()
+	db, err := fingerprints.Load([]byte(raw))
+	if err != nil {
+		t.Fatalf("load DB: %v", err)
+	}
+	return db
+}
+
+var testFingerprintsJSON = `[
+  {"service":"AWS/S3","cname":["s3.amazonaws.com"],"fingerprint":"The specified bucket does not exist","nxdomain":false,"status":"Vulnerable","discussion":""},
+  {"service":"GitHub Pages","cname":["github.io"],"fingerprint":"There isn't a GitHub Pages site here.","nxdomain":false,"status":"Vulnerable","discussion":""},
+  {"service":"Azure","cname":["azurewebsites.net"],"fingerprint":"","nxdomain":true,"status":"Vulnerable","discussion":""}
+]`
+
+// ---- fingerprint matching --------------------------------------------------
+
+func TestMatchCNAME_Hit(t *testing.T) {
+	db := mustDB(t, testFingerprintsJSON)
+	hits := db.MatchCNAME("mybucket.s3.amazonaws.com")
+	if len(hits) != 1 || hits[0].Service != "AWS/S3" {
+		t.Fatalf("expected AWS/S3 hit, got %v", hits)
+	}
+}
+
+func TestMatchCNAME_Miss(t *testing.T) {
+	db := mustDB(t, testFingerprintsJSON)
+	hits := db.MatchCNAME("app.heroku.com")
+	if len(hits) != 0 {
+		t.Fatalf("expected no hits, got %v", hits)
+	}
+}
+
+func TestMatchBody(t *testing.T) {
+	db := mustDB(t, testFingerprintsJSON)
+	fp := db.MatchCNAME("mybucket.s3.amazonaws.com")[0]
+
+	if !fp.MatchBody([]byte("... The specified bucket does not exist ...")) {
+		t.Error("expected body match")
+	}
+	if fp.MatchBody([]byte("hello world")) {
+		t.Error("unexpected body match")
+	}
+}
+
+func TestMatchBody_EmptyFingerprint(t *testing.T) {
+	db := mustDB(t, testFingerprintsJSON)
+	fp := db.MatchCNAME("app.azurewebsites.net")[0]
+	if fp.MatchBody([]byte("anything")) {
+		t.Error("empty fingerprint should never match body")
+	}
+}
+
+// ---- SPF parsing -----------------------------------------------------------
+
+func TestExtractSPF(t *testing.T) {
+	cases := []struct {
+		txts []string
+		want string
+	}{
+		{[]string{"v=spf1 include:spf.example.com ~all"}, "v=spf1 include:spf.example.com ~all"},
+		{[]string{"some-other-record", "v=spf1 include:a.com -all"}, "v=spf1 include:a.com -all"},
+		{[]string{"v=spf1"}, "v=spf1"},
+		{[]string{"not-spf"}, ""},
+		{nil, ""},
+	}
+	for _, c := range cases {
+		got := extractSPF(c.txts)
+		if got != c.want {
+			t.Errorf("extractSPF(%v) = %q, want %q", c.txts, got, c.want)
+		}
+	}
+}
+
+// stubResolver is a minimal resolver that records calls and returns canned data.
+type stubResolver struct {
+	cnameChains map[string][]string
+	cnameErrors map[string]error
+	txts        map[string][]string
+	nsList      map[string][]string
+	soaError    map[string]error // keyed by "zone@ns"
+	wildcards   map[string]bool
+}
+
+func newStub() *stubResolver {
+	return &stubResolver{
+		cnameChains: map[string][]string{},
+		cnameErrors: map[string]error{},
+		txts:        map[string][]string{},
+		nsList:      map[string][]string{},
+		soaError:    map[string]error{},
+		wildcards:   map[string]bool{},
+	}
+}
+
+// We can't easily swap out the *resolver.Resolver since it has unexported fields,
+// so we test the pure-logic helpers separately and drive the full detectors
+// through an httptest server for HTTP-dependent paths.
+
+// ---- CNAME confidence ladder -----------------------------------------------
+
+// TestCNAMEConfidence_Confirmed_BodyMatch exercises the path where the HTTP
+// body contains the fingerprint string → Confirmed.
+func TestCNAMEConfidence_Confirmed_BodyMatch(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("The specified bucket does not exist"))
+	}))
+	defer srv.Close()
+
+	// Point sharedTransport at the test TLS server.
+	orig := sharedTransport
+	sharedTransport = srv.Client().Transport.(*http.Transport)
+	defer func() { sharedTransport = orig }()
+
+	db := mustDB(t, testFingerprintsJSON)
+
+	// Fabricate a fingerprint match result for the test server host.
+	fp := db.MatchCNAME("mybucket.s3.amazonaws.com")[0]
+	host := srv.Listener.Addr().String()
+
+	f := finding.Finding{
+		Subdomain:   "test.example.com",
+		Vector:      finding.VectorCNAME,
+		Service:     fp.Service,
+		Fingerprint: fp.Fingerprint,
+		CNAME:       host,
+	}
+
+	cfg := Config{HTTPSOnly: true, Timeout: 5 * 1e9} // 5s
+
+	body, scheme, err := probeHTTP(context.Background(), host, cfg)
+	if err != nil {
+		t.Fatalf("probeHTTP: %v", err)
+	}
+	if scheme != "https" {
+		t.Errorf("expected https, got %s", scheme)
+	}
+	if !fp.MatchBody(body) {
+		t.Errorf("expected body match")
+	}
+
+	// Assign confidence as the detector would.
+	if fp.MatchBody(body) {
+		f.Confidence = finding.Confirmed
+	} else {
+		f.Confidence = finding.Likely
+	}
+	if f.Confidence != finding.Confirmed {
+		t.Errorf("expected Confirmed, got %s", f.Confidence)
+	}
+}
+
+// TestCNAMEConfidence_Likely_NoBodyMatch exercises the path where the CNAME
+// matches a known service but the body string is absent → Likely.
+func TestCNAMEConfidence_Likely_NoBodyMatch(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("some other content"))
+	}))
+	defer srv.Close()
+
+	orig := sharedTransport
+	sharedTransport = srv.Client().Transport.(*http.Transport)
+	defer func() { sharedTransport = orig }()
+
+	db := mustDB(t, testFingerprintsJSON)
+	fp := db.MatchCNAME("mybucket.s3.amazonaws.com")[0]
+	host := srv.Listener.Addr().String()
+
+	cfg := Config{HTTPSOnly: true, Timeout: 5 * 1e9}
+	body, _, err := probeHTTP(context.Background(), host, cfg)
+	if err != nil {
+		t.Fatalf("probeHTTP: %v", err)
+	}
+
+	var conf finding.Confidence
+	if fp.MatchBody(body) {
+		conf = finding.Confirmed
+	} else {
+		conf = finding.Likely
+	}
+	if conf != finding.Likely {
+		t.Errorf("expected Likely, got %s", conf)
+	}
+}
+
+// TestCNAMEConfidence_Potential checks the matchChain helper returns no hits
+// when no fingerprint covers the CNAME target.
+func TestCNAMEConfidence_Potential(t *testing.T) {
+	db := mustDB(t, testFingerprintsJSON)
+	chain := []string{"app.unknown-service.io"}
+	matches := matchChain(db, chain)
+	if len(matches) != 0 {
+		t.Errorf("expected no matches for unknown service, got %d", len(matches))
+	}
+}
+
+// TestMatchChain_Dedup verifies that the same service matched at multiple
+// chain hops is emitted only once.
+func TestMatchChain_Dedup(t *testing.T) {
+	db := mustDB(t, `[{"service":"Svc","cname":["a.com","b.com"],"fingerprint":"x","nxdomain":false,"status":"Vulnerable","discussion":""}]`)
+	// Both hops match the same service.
+	chain := []string{"foo.a.com", "bar.b.com"}
+	matches := matchChain(db, chain)
+	if len(matches) != 1 {
+		t.Errorf("expected 1 deduplicated match, got %d", len(matches))
+	}
+}
+
+// ---- NS provider matching --------------------------------------------------
+
+func TestMatchNSProvider_Known(t *testing.T) {
+	ns := []string{"ns1.p20.awsdns-20.org", "ns2.p20.awsdns-20.org"}
+	p := matchNSProvider(ns)
+	if p == "" {
+		t.Error("expected provider match for AWS Route 53 nameserver")
+	}
+}
+
+func TestMatchNSProvider_Unknown(t *testing.T) {
+	ns := []string{"ns1.example-registrar.com"}
+	p := matchNSProvider(ns)
+	if p != "" {
+		t.Errorf("expected empty provider, got %q", p)
+	}
+}
+
+// ---- isConnectError --------------------------------------------------------
+
+func TestIsConnectError(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want bool
+	}{
+		{"connection refused", true},
+		{"no such host", true},
+		{"i/o timeout", true},
+		{"tls: bad certificate", true},
+		{"404 Not Found", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		err := &errMsg{c.msg}
+		if got := isConnectError(err); got != c.want {
+			t.Errorf("isConnectError(%q) = %v, want %v", c.msg, got, c.want)
+		}
+	}
+}
+
+type errMsg struct{ s string }
+
+func (e *errMsg) Error() string { return e.s }
+
+// ---- DB merge / load -------------------------------------------------------
+
+func TestDB_Merge(t *testing.T) {
+	a := mustDB(t, `[{"service":"A","cname":["a.com"],"fingerprint":"x","nxdomain":false,"status":"Vulnerable","discussion":""}]`)
+	b := mustDB(t, `[{"service":"A","cname":["a.com"],"fingerprint":"y","nxdomain":false,"status":"Vulnerable","discussion":""},
+	                  {"service":"B","cname":["b.com"],"fingerprint":"z","nxdomain":false,"status":"Vulnerable","discussion":""}]`)
+	a.Merge(b)
+	if a.Len() != 2 {
+		t.Errorf("expected 2 entries after merge, got %d", a.Len())
+	}
+	// Service A should be replaced by b's version.
+	hits := a.MatchCNAME("app.a.com")
+	if len(hits) != 1 || hits[0].Fingerprint != "y" {
+		t.Errorf("expected replaced fingerprint 'y', got %v", hits)
+	}
+}
+
+// ---- Embedded seed DB ------------------------------------------------------
+
+func TestEmbedded(t *testing.T) {
+	db, err := fingerprints.Embedded()
+	if err != nil {
+		t.Fatalf("Embedded: %v", err)
+	}
+	if db.Len() == 0 {
+		t.Error("embedded DB should have at least one fingerprint")
+	}
+}
+
+// ---- resolver sentinel values ----------------------------------------------
+
+func TestResolverSentinels(t *testing.T) {
+	r := resolver.New(nil, 0)
+	if r == nil {
+		t.Fatal("resolver.New returned nil")
+	}
+	// Servers() and Timeout() must not panic.
+	_ = r.Servers()
+	_ = r.Timeout()
+}

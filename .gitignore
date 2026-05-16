@@ -1,0 +1,27 @@
+# Binaries (compiled output at repo root; cmd/ source tree is not excluded)
+/graverobber
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage
+*.test
+*.out
+coverage.txt
+
+# goreleaser / cross-compiled release artifacts
+/dist/
+
+# Local-only fingerprint lists (the --fingerprints private-list feature)
+*.local.json
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
