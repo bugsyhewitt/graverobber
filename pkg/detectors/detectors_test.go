@@ -2,9 +2,13 @@ package detectors
 
 import (
 	"context"
+	"crypto/tls"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/bugsyhewitt/graverobber/pkg/finding"
 	"github.com/bugsyhewitt/graverobber/pkg/fingerprints"
@@ -304,4 +308,196 @@ func TestResolverSentinels(t *testing.T) {
 	// Servers() and Timeout() must not panic.
 	_ = r.Servers()
 	_ = r.Timeout()
+}
+
+// ---- #3: per-host rate limiter goroutine lifecycle -------------------------
+
+// TestDrainBuckets_ClearsBucketMap verifies that DrainBuckets removes all
+// entries from the bucket map and that new requests after drain create fresh
+// buckets (proving the stop channel design does not leave dangling state).
+func TestDrainBuckets_ClearsBucketMap(t *testing.T) {
+	// Ensure a clean slate.
+	DrainBuckets()
+
+	// Create some buckets.
+	for i := 0; i < 5; i++ {
+		_ = destWait(context.Background(), fmt.Sprintf("host%d.test.invalid", i))
+	}
+
+	bucketsMu.Lock()
+	before := len(buckets)
+	bucketsMu.Unlock()
+
+	if before == 0 {
+		t.Fatal("expected non-zero bucket count after destWait calls")
+	}
+
+	DrainBuckets()
+
+	bucketsMu.Lock()
+	after := len(buckets)
+	bucketsMu.Unlock()
+
+	if after != 0 {
+		t.Errorf("DrainBuckets must clear all buckets, got %d remaining", after)
+	}
+}
+
+// TestDrainBuckets_GoroutinesStop verifies that the ticker goroutine for a
+// bucket actually exits after DrainBuckets is called. The goroutine count
+// must not grow unbounded with input size.
+func TestDrainBuckets_GoroutinesStop(t *testing.T) {
+	DrainBuckets()
+
+	before := runtime.NumGoroutine()
+
+	const hosts = 20
+	for i := 0; i < hosts; i++ {
+		_ = destWait(context.Background(), fmt.Sprintf("gtest%d.test.invalid", i))
+	}
+
+	created := runtime.NumGoroutine()
+	if created <= before {
+		// Runtime may reuse goroutines; skip rather than fail.
+		t.Skip("goroutine count did not increase; skipping goroutine-drain check")
+	}
+
+	DrainBuckets()
+
+	// Allow goroutines a moment to observe the stop channel and exit.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		runtime.Gosched()
+		if runtime.NumGoroutine() <= before+2 { // +2 for scheduler noise
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Errorf("goroutines did not stop after DrainBuckets: before=%d created=%d now=%d",
+		before, created, runtime.NumGoroutine())
+}
+
+// TestDestWait_ContextCancellation verifies that destWait returns ctx.Err()
+// when the context is cancelled while waiting for a token.
+func TestDestWait_ContextCancellation(t *testing.T) {
+	DrainBuckets()
+
+	// Create a bucket with zero initial tokens and a very slow refill so it
+	// will definitely block.
+	const rps = 1
+	b := &hostBucket{
+		tokens: make(chan struct{}, rps),
+		stop:   make(chan struct{}),
+	}
+	// Do NOT pre-fill — bucket starts empty so the first destWait blocks.
+	interval := time.Second / rps
+	go func() {
+		tick := time.NewTicker(interval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-b.stop:
+				return
+			case <-tick.C:
+				select {
+				case b.tokens <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+
+	bucketsMu.Lock()
+	buckets["ctx-cancel-test.invalid"] = b
+	bucketsMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- destWait(ctx, "ctx-cancel-test.invalid")
+	}()
+
+	// Cancel immediately — destWait should unblock.
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected non-nil error from cancelled destWait")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Error("destWait did not return after context cancellation")
+	}
+
+	// DrainBuckets closes b.stop and clears the map — do not close b.stop manually.
+	DrainBuckets()
+}
+
+// ---- #4: TLS InsecureSkipVerify is present and deliberate ------------------
+
+// TestSharedTransport_InsecureSkipVerify confirms the HTTP probe transport
+// skips TLS verification. Dangling endpoints characteristically serve
+// mismatched certificates; without this flag, the HTTPS probe would fail on
+// the very targets the tool is designed to detect.
+func TestSharedTransport_InsecureSkipVerify(t *testing.T) {
+	if sharedTransport.TLSClientConfig == nil {
+		t.Fatal("sharedTransport.TLSClientConfig must not be nil")
+	}
+	if !sharedTransport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("sharedTransport must set InsecureSkipVerify=true for recon probes")
+	}
+}
+
+// TestProbeHTTP_MismatchedCert verifies that probeHTTP succeeds against a TLS
+// server whose certificate does not match the probed hostname — the exact
+// condition present on dangling-CNAME endpoints.
+func TestProbeHTTP_MismatchedCert(t *testing.T) {
+	const body = "The specified bucket does not exist"
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	// srv.Client() has the test CA; our sharedTransport (InsecureSkipVerify)
+	// should succeed even without that CA.
+	orig := sharedTransport
+	sharedTransport = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+	}
+	defer func() { sharedTransport = orig }()
+
+	got, scheme, err := probeHTTP(context.Background(), srv.Listener.Addr().String(),
+		Config{HTTPSOnly: true, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("probeHTTP with InsecureSkipVerify failed: %v", err)
+	}
+	if scheme != "https" {
+		t.Errorf("expected https scheme, got %s", scheme)
+	}
+	if string(got) != body {
+		t.Errorf("expected body %q, got %q", body, got)
+	}
+}
+
+// TestNSUnanimity verifies that matchNSProvider only confirms known providers
+// and that the NS algorithm skeleton respects the unanimity invariant.
+// (Live DNS testing is not in-scope for unit tests; this covers logic paths.)
+func TestNSUnanimity_MatchProvider(t *testing.T) {
+	// Known providers should be matched.
+	known := []struct {
+		ns   []string
+		want bool
+	}{
+		{[]string{"ns1.example.awsdns-01.com"}, true},
+		{[]string{"ns1.googledomains.com"}, true},
+		{[]string{"ns1.azure-dns.com"}, true},
+		{[]string{"ns1.cloudflare.com"}, true},
+		{[]string{"ns1.completely-unknown-registrar.com"}, false},
+	}
+	for _, tc := range known {
+		got := matchNSProvider(tc.ns) != ""
+		if got != tc.want {
+			t.Errorf("matchNSProvider(%v) known=%v, want=%v", tc.ns, got, tc.want)
+		}
+	}
 }

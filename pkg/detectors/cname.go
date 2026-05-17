@@ -8,6 +8,7 @@ package detectors
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net/http"
@@ -31,10 +32,17 @@ type Config struct {
 	Timeout time.Duration
 }
 
-// hostBucket is a simple buffered-channel token bucket implementing ~N req/s
-// per destination. It runs a background ticker goroutine for the process lifetime.
+// hostBucket is a buffered-channel token bucket limiting a destination to ~N
+// req/s. Each bucket owns one ticker goroutine; stop is closed by DrainBuckets
+// to reclaim goroutines between scan runs.
+//
+// Goroutine lifetime: goroutines are tied to the scan session, not the process.
+// CLI callers can ignore this (the process exits). Library embedders (e.g. the
+// Pho3nix MCP server) MUST call DrainBuckets() after each scan to prevent
+// goroutine accumulation across multiple scan invocations.
 type hostBucket struct {
 	tokens chan struct{}
+	stop   chan struct{}
 }
 
 const (
@@ -47,8 +55,9 @@ var (
 	buckets   = map[string]*hostBucket{}
 )
 
-// destWait blocks until the per-host token bucket allows a request.
-func destWait(host string) {
+// destWait blocks until the per-host token bucket allows a request, or the
+// context is cancelled (in which case it returns ctx.Err()).
+func destWait(ctx context.Context, host string) error {
 	bucketsMu.Lock()
 	b, ok := buckets[host]
 	if !ok {
@@ -56,11 +65,31 @@ func destWait(host string) {
 		buckets[host] = b
 	}
 	bucketsMu.Unlock()
-	<-b.tokens
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.tokens:
+		return nil
+	}
+}
+
+// DrainBuckets stops all per-host rate-limit goroutines and clears the bucket
+// cache. Library embedders must call this after each scan to reclaim goroutines.
+// It is safe to call concurrently and from any goroutine.
+func DrainBuckets() {
+	bucketsMu.Lock()
+	defer bucketsMu.Unlock()
+	for _, b := range buckets {
+		close(b.stop)
+	}
+	buckets = map[string]*hostBucket{}
 }
 
 func newBucket(rps int) *hostBucket {
-	b := &hostBucket{tokens: make(chan struct{}, rps)}
+	b := &hostBucket{
+		tokens: make(chan struct{}, rps),
+		stop:   make(chan struct{}),
+	}
 	// Pre-fill so the first burst of requests is not unnecessarily throttled.
 	for i := 0; i < rps; i++ {
 		b.tokens <- struct{}{}
@@ -69,10 +98,15 @@ func newBucket(rps int) *hostBucket {
 	go func() {
 		tick := time.NewTicker(interval)
 		defer tick.Stop()
-		for range tick.C {
+		for {
 			select {
-			case b.tokens <- struct{}{}:
-			default: // bucket full; discard tick
+			case <-b.stop:
+				return
+			case <-tick.C:
+				select {
+				case b.tokens <- struct{}{}:
+				default: // bucket full; discard tick
+				}
 			}
 		}
 	}()
@@ -81,6 +115,14 @@ func newBucket(rps int) *hostBucket {
 
 var sharedTransport = &http.Transport{
 	ResponseHeaderTimeout: 10 * time.Second,
+	// InsecureSkipVerify is deliberate: dangling/unclaimed service endpoints
+	// characteristically serve TLS certificates that do NOT match the probed
+	// hostname — that cert mismatch is part of the vulnerable state we are
+	// trying to detect. Enforcing cert validity would cause the HTTPS probe to
+	// fail on the most interesting targets and prevent reading the body
+	// fingerprint. This is a security-recon probe, not a trust-sensitive
+	// connection. Do not remove without updating isConnectError fallback logic.
+	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 }
 
 // fetch performs a single GET to url and returns the (capped) body.
@@ -102,7 +144,9 @@ func fetch(ctx context.Context, url string, timeout time.Duration) ([]byte, erro
 // probeHTTP fetches host via HTTPS then HTTP (per cfg), enforcing the per-host
 // rate limit. Returns body, winning scheme, and any error.
 func probeHTTP(ctx context.Context, host string, cfg Config) ([]byte, string, error) {
-	destWait(host)
+	if err := destWait(ctx, host); err != nil {
+		return nil, "", err
+	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second

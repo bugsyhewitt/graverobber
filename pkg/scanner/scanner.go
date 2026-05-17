@@ -79,9 +79,14 @@ func (s *Scanner) SetVerifier(v verifier.Verifier) {
 // returned channel, which is closed once every worker has drained and exited
 // (either targets closed, or ctx cancelled). Run does not block — it returns
 // the output channel immediately.
+//
+// Findings are deduplicated within a single Run call by the key
+// (Subdomain, Vector, Service) so that duplicate input targets or multi-hop
+// chains that match the same service never produce duplicate output rows.
 func (s *Scanner) Run(ctx context.Context, targets <-chan string) <-chan finding.Finding {
 	out := make(chan finding.Finding)
 	var wg sync.WaitGroup
+	var emitted sync.Map // key: subdomain+"\x00"+vector+"\x00"+service
 
 	wg.Add(s.opts.Concurrency)
 	for i := 0; i < s.opts.Concurrency; i++ {
@@ -95,7 +100,7 @@ func (s *Scanner) Run(ctx context.Context, targets <-chan string) <-chan finding
 					if !ok {
 						return
 					}
-					s.scanTarget(ctx, target, out)
+					s.scanTarget(ctx, target, &emitted, out)
 				}
 			}
 		}()
@@ -109,12 +114,17 @@ func (s *Scanner) Run(ctx context.Context, targets <-chan string) <-chan finding
 	return out
 }
 
+// dedupKey returns the deduplication key for a finding.
+func dedupKey(f finding.Finding) string {
+	return f.Subdomain + "\x00" + string(f.Vector) + "\x00" + f.Service
+}
+
 // scanTarget runs the per-target detection pipeline and emits any findings.
 //
 // CNAME always runs. NS and SPF run unless disabled; the handoff specifies them
 // as additional per-target work that does not block the CNAME path — the build
 // step may parallelise the three vectors with their own goroutines.
-func (s *Scanner) scanTarget(ctx context.Context, target string, out chan<- finding.Finding) {
+func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.Map, out chan<- finding.Finding) {
 	cfg := detectors.Config{HTTPOnly: s.opts.HTTPOnly, HTTPSOnly: s.opts.HTTPSOnly}
 
 	var found []finding.Finding
@@ -134,6 +144,9 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, out chan<- find
 	}
 
 	for _, f := range found {
+		if _, dup := emitted.LoadOrStore(dedupKey(f), struct{}{}); dup {
+			continue
+		}
 		if f.Timestamp.IsZero() {
 			f.Timestamp = time.Now().UTC()
 		}
