@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -117,6 +118,176 @@ func TestRun_TerminatesWithEmptyDB(t *testing.T) {
 	// With an empty DB, no findings should be emitted.
 	if count != 0 {
 		t.Errorf("expected 0 findings from empty DB, got %d", count)
+	}
+}
+
+// ---- #1 (POST_V01 Rank 1): vectors run concurrently per target -------------
+
+// TestRun_VectorsRunConcurrently verifies that the three per-target detection
+// vectors (CNAME, NS, SPF) execute concurrently rather than serially. Each
+// vector is replaced with a stub that sleeps for a fixed delay; if the vectors
+// ran serially the per-target wall time would be ~3*delay, but concurrent
+// execution bounds it to ~max(delay) plus scheduling slack.
+//
+// The test injects stubs via the package-private vector seam (cnameVector,
+// nsVector, spfVector) so it exercises scanTarget's real fan-out path without
+// touching DNS or HTTP.
+func TestRun_VectorsRunConcurrently(t *testing.T) {
+	const delay = 200 * time.Millisecond
+
+	// Save and restore the production vector functions.
+	origCNAME, origNS, origSPF := cnameVector, nsVector, spfVector
+	t.Cleanup(func() {
+		cnameVector, nsVector, spfVector = origCNAME, origNS, origSPF
+	})
+
+	// Track peak concurrency to prove the vectors overlap in time.
+	var inFlight, peak int32
+	stub := func(ctx context.Context, _ *Scanner, _ string) ([]finding.Finding, error) {
+		cur := atomic.AddInt32(&inFlight, 1)
+		for {
+			p := atomic.LoadInt32(&peak)
+			if cur <= p || atomic.CompareAndSwapInt32(&peak, p, cur) {
+				break
+			}
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(delay):
+		}
+		atomic.AddInt32(&inFlight, -1)
+		return nil, nil
+	}
+	cnameVector, nsVector, spfVector = stub, stub, stub
+
+	db, err := fingerprints.Load([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("load db: %v", err)
+	}
+	// Single worker, single target: any concurrency observed must come from the
+	// per-target vector fan-out, not from multiple workers or targets.
+	sc := New(db, Options{Concurrency: 1, Timeout: time.Second})
+
+	targets := make(chan string, 1)
+	targets <- "sub.example.com"
+	close(targets)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	for range sc.Run(ctx, targets) {
+	}
+	elapsed := time.Since(start)
+
+	// Serial execution would take ~3*delay (600ms). Concurrent execution takes
+	// ~delay (200ms). Use 2*delay as the upper bound: comfortably above the
+	// concurrent expectation, well below the serial sum, robust to CI jitter.
+	if elapsed >= 2*delay {
+		t.Errorf("per-target wall time %v >= %v: vectors appear to run serially "+
+			"(serial sum would be ~%v, concurrent ~%v)",
+			elapsed, 2*delay, 3*delay, delay)
+	}
+
+	if peak < 3 {
+		t.Errorf("peak concurrent vectors = %d, want 3: vectors are not all "+
+			"running at the same time", peak)
+	}
+}
+
+// TestRun_DisabledVectorsAreNotRun verifies the fan-out still honours the NoNS
+// and NoSPF options — disabled vectors must not be dispatched even though the
+// enabled ones now run concurrently.
+func TestRun_DisabledVectorsAreNotRun(t *testing.T) {
+	origCNAME, origNS, origSPF := cnameVector, nsVector, spfVector
+	t.Cleanup(func() {
+		cnameVector, nsVector, spfVector = origCNAME, origNS, origSPF
+	})
+
+	var cnameCalls, nsCalls, spfCalls int32
+	cnameVector = func(_ context.Context, _ *Scanner, _ string) ([]finding.Finding, error) {
+		atomic.AddInt32(&cnameCalls, 1)
+		return nil, nil
+	}
+	nsVector = func(_ context.Context, _ *Scanner, _ string) ([]finding.Finding, error) {
+		atomic.AddInt32(&nsCalls, 1)
+		return nil, nil
+	}
+	spfVector = func(_ context.Context, _ *Scanner, _ string) ([]finding.Finding, error) {
+		atomic.AddInt32(&spfCalls, 1)
+		return nil, nil
+	}
+
+	db, err := fingerprints.Load([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("load db: %v", err)
+	}
+	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoNS: true, NoSPF: true})
+
+	targets := make(chan string, 1)
+	targets <- "sub.example.com"
+	close(targets)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for range sc.Run(ctx, targets) {
+	}
+
+	if got := atomic.LoadInt32(&cnameCalls); got != 1 {
+		t.Errorf("CNAME vector called %d times, want 1 (CNAME always runs)", got)
+	}
+	if got := atomic.LoadInt32(&nsCalls); got != 0 {
+		t.Errorf("NS vector called %d times, want 0 (NoNS set)", got)
+	}
+	if got := atomic.LoadInt32(&spfCalls); got != 0 {
+		t.Errorf("SPF vector called %d times, want 0 (NoSPF set)", got)
+	}
+}
+
+// TestRun_AllVectorFindingsAreEmitted verifies that findings produced by every
+// enabled vector survive the concurrent fan-out and reach the output channel
+// (subject to the unchanged dedup logic).
+func TestRun_AllVectorFindingsAreEmitted(t *testing.T) {
+	origCNAME, origNS, origSPF := cnameVector, nsVector, spfVector
+	t.Cleanup(func() {
+		cnameVector, nsVector, spfVector = origCNAME, origNS, origSPF
+	})
+
+	mk := func(v finding.Vector, svc string) vectorFunc {
+		return func(_ context.Context, _ *Scanner, target string) ([]finding.Finding, error) {
+			return []finding.Finding{{Subdomain: target, Vector: v, Service: svc}}, nil
+		}
+	}
+	cnameVector = mk(finding.VectorCNAME, "AWS/S3")
+	nsVector = mk(finding.VectorNS, "Route53")
+	spfVector = mk(finding.VectorSPF, "SendGrid")
+
+	db, err := fingerprints.Load([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("load db: %v", err)
+	}
+	sc := New(db, Options{Concurrency: 1, Timeout: time.Second})
+
+	targets := make(chan string, 1)
+	targets <- "sub.example.com"
+	close(targets)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	got := map[finding.Vector]bool{}
+	var n int
+	for f := range sc.Run(ctx, targets) {
+		got[f.Vector] = true
+		n++
+	}
+	if n != 3 {
+		t.Errorf("emitted %d findings, want 3 (one per vector)", n)
+	}
+	for _, v := range []finding.Vector{finding.VectorCNAME, finding.VectorNS, finding.VectorSPF} {
+		if !got[v] {
+			t.Errorf("no finding emitted for vector %q", v)
+		}
 	}
 }
 

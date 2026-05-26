@@ -5,7 +5,16 @@ Each item is scoped to be implementable in one focused Phase 2 lap.
 
 ---
 
-## Rank 1 — Parallel per-target vector execution
+## Rank 1 — Parallel per-target vector execution — ✅ IMPLEMENTED (Phase 2, Rotation 2, 2026-05-26)
+
+**Status:** Shipped. `scanner.scanTarget` now fans the enabled vectors out across
+one goroutine each (`sync.WaitGroup`), collecting into per-vector slots and
+joining before the unchanged dedup/emit pass. Per-target wall time is now
+~max(CNAME, NS, SPF) instead of the sum. No public API or output-semantic
+changes; the `emitted` dedup map is untouched. Guarded by
+`TestRun_VectorsRunConcurrently` (timing + peak-concurrency assertions),
+`TestRun_DisabledVectorsAreNotRun`, and `TestRun_AllVectorFindingsAreEmitted`
+in `pkg/scanner/scanner_test.go`.
 
 **What:** Each target currently runs CNAME → NS → SPF serially inside
 `scanner.scanTarget`. The three vectors are independent: CNAME probes HTTP
@@ -236,7 +245,7 @@ surface and test complexity.
 
 | Rank | Item | Effort | Impact | Changes API? |
 |------|------|--------|--------|-------------|
-| 1 | Parallel vector execution per target | Low | High (throughput) | No |
+| 1 | Parallel vector execution per target ✅ | Low | High (throughput) | No |
 | 2 | Active verifier: S3, GitHub Pages, Azure | Medium | High (accuracy) | No (SetVerifier seam ready) |
 | 3 | MX record fourth vector | Medium | High (new coverage) | Yes (new vector + flag) |
 | 4 | NS provider list sync from indianajson | Low-Med | Medium (accuracy) | No |
