@@ -119,28 +119,67 @@ func dedupKey(f finding.Finding) string {
 	return f.Subdomain + "\x00" + string(f.Vector) + "\x00" + f.Service
 }
 
+// vectorFunc is one detection vector's per-target entry point. The three
+// production vectors (CNAME, NS, SPF) are wired through package-level vars of
+// this type so that scanTarget dispatches them uniformly and concurrently, and
+// so tests can substitute deterministic stubs without touching DNS or HTTP.
+type vectorFunc func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error)
+
+// The production vectors. These are vars, not direct calls, purely to provide a
+// package-private seam for the scanner's concurrency tests; production code
+// never reassigns them.
+var (
+	cnameVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		cfg := detectors.Config{HTTPOnly: s.opts.HTTPOnly, HTTPSOnly: s.opts.HTTPSOnly}
+		return detectors.CNAME(ctx, target, s.resolver, s.db, cfg)
+	}
+	nsVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.NS(ctx, target, s.resolver)
+	}
+	spfVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.SPF(ctx, target, s.resolver)
+	}
+)
+
 // scanTarget runs the per-target detection pipeline and emits any findings.
 //
-// CNAME always runs. NS and SPF run unless disabled; the handoff specifies them
-// as additional per-target work that does not block the CNAME path — the build
-// step may parallelise the three vectors with their own goroutines.
+// CNAME always runs. NS and SPF run unless disabled. The three vectors are
+// independent and I/O-bound (CNAME probes HTTP, NS probes authoritative
+// nameservers with UDP retries, SPF recurses TXT records), so scanTarget fans
+// them out across one goroutine each and joins on a WaitGroup. Per-target wall
+// time is therefore roughly max(CNAME, NS, SPF) rather than their sum.
+//
+// Only the collection of findings is parallelised; deduplication
+// (the emitted sync.Map) and emission are performed serially afterwards exactly
+// as before, so output semantics are unchanged.
 func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.Map, out chan<- finding.Finding) {
-	cfg := detectors.Config{HTTPOnly: s.opts.HTTPOnly, HTTPSOnly: s.opts.HTTPSOnly}
-
-	var found []finding.Finding
-
-	if fs, err := detectors.CNAME(ctx, target, s.resolver, s.db, cfg); err == nil {
-		found = append(found, fs...)
-	}
+	// Select the enabled vectors. CNAME always runs; NS and SPF are opt-out.
+	vectors := []vectorFunc{cnameVector}
 	if !s.opts.NoNS {
-		if fs, err := detectors.NS(ctx, target, s.resolver); err == nil {
-			found = append(found, fs...)
-		}
+		vectors = append(vectors, nsVector)
 	}
 	if !s.opts.NoSPF {
-		if fs, err := detectors.SPF(ctx, target, s.resolver); err == nil {
-			found = append(found, fs...)
-		}
+		vectors = append(vectors, spfVector)
+	}
+
+	// Fan out: run each enabled vector concurrently, collecting findings into a
+	// per-vector slot so no shared-slice synchronisation is needed.
+	results := make([][]finding.Finding, len(vectors))
+	var wg sync.WaitGroup
+	wg.Add(len(vectors))
+	for i, vec := range vectors {
+		go func(i int, vec vectorFunc) {
+			defer wg.Done()
+			if fs, err := vec(ctx, s, target); err == nil {
+				results[i] = fs
+			}
+		}(i, vec)
+	}
+	wg.Wait()
+
+	var found []finding.Finding
+	for _, fs := range results {
+		found = append(found, fs...)
 	}
 
 	for _, f := range found {
