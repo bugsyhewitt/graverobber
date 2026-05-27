@@ -97,9 +97,29 @@ diff. The cache is canonical; a compiled-in snapshot is the offline fallback.
 | `--rate-limit` | 0 | Global max requests/sec (0 = unlimited) |
 | `--http-only` | false | Probe services over HTTP only |
 | `--https-only` | false | Probe services over HTTPS only |
+| `--verify` | false | Actively verify S3 / GitHub Pages / Azure findings (upgrades `LIKELY` → `CONFIRMED`) |
+| `--github-token` | — | GitHub token for the `--verify` Pages probe (raises the API rate limit) |
 
 When neither `--http-only` nor `--https-only` is set, `graverobber` probes
 HTTPS first and falls back to HTTP.
+
+### Active verification (`--verify`)
+
+By default `graverobber` assigns confidence from the fingerprint stage alone. With
+`--verify`, the three highest-signal services get an extra unauthenticated probe that
+can upgrade a `LIKELY` finding to `CONFIRMED`:
+
+- **AWS/S3** — GET `https://<bucket>.s3.amazonaws.com/`; a `404` carrying `NoSuchBucket`
+  confirms the bucket is unclaimed.
+- **GitHub Pages** — GET `https://api.github.com/repos/<user>/<user>.github.io`; a `404`
+  confirms the backing repo is gone. Pass `--github-token` to lift the 60 req/h
+  unauthenticated limit to 5000 req/h.
+- **Microsoft Azure** — confirms an `azurewebsites.net` / `cloudapp.net` /
+  `trafficmanager.net` (etc.) target via DNS `NXDOMAIN`.
+
+All probes are read-only — `graverobber` confirms claimability, it never claims the
+resource. Verification only ever upgrades confidence; it never downgrades, and it never
+touches a finding the fingerprint stage already marked `CONFIRMED`.
 
 ---
 

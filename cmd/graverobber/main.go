@@ -27,6 +27,7 @@ import (
 	"github.com/bugsyhewitt/graverobber/pkg/fingerprints"
 	"github.com/bugsyhewitt/graverobber/pkg/output"
 	"github.com/bugsyhewitt/graverobber/pkg/scanner"
+	"github.com/bugsyhewitt/graverobber/pkg/verifier"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -76,6 +77,8 @@ type cliFlags struct {
 	rateLimit    int
 	httpOnly     bool
 	httpsOnly    bool
+	verify       bool
+	githubToken  string
 }
 
 func newRootCmd() *cobra.Command {
@@ -116,6 +119,8 @@ func newRootCmd() *cobra.Command {
 	fl.IntVar(&f.rateLimit, "rate-limit", 0, "global max requests/sec (0 = unlimited)")
 	fl.BoolVar(&f.httpOnly, "http-only", false, "probe services over HTTP only")
 	fl.BoolVar(&f.httpsOnly, "https-only", false, "probe services over HTTPS only")
+	fl.BoolVar(&f.verify, "verify", false, "actively verify S3/GitHub Pages/Azure findings (upgrades LIKELY→CONFIRMED)")
+	fl.StringVar(&f.githubToken, "github-token", "", "GitHub token for the --verify Pages probe (raises API rate limit)")
 
 	root.AddCommand(newUpdateCmd())
 	return root
@@ -181,6 +186,13 @@ func runScan(ctx context.Context, f *cliFlags) error {
 	targets, scanErr := targetChan(ctx, f)
 
 	sc := scanner.New(db, opts)
+	if f.verify {
+		sc.SetVerifier(verifier.NewServiceVerifier(verifier.Config{
+			GitHubToken: f.githubToken,
+			Timeout:     opts.Timeout,
+			Resolvers:   resolvers,
+		}))
+	}
 	findings := sc.Run(ctx, targets)
 
 	var count int
