@@ -22,6 +22,9 @@ const (
 	// VectorSPF: an SPF include: directive references a domain that is
 	// unregistered and therefore claimable (the SubdoMailing vector).
 	VectorSPF Vector = "spf"
+	// VectorMX: a dangling MX record points at a mail host that is NXDOMAIN or
+	// belongs to a cloud mail provider whose hosted zone has been deleted.
+	VectorMX Vector = "mx"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.
@@ -57,6 +60,8 @@ type Finding struct {
 	Nameservers []string `json:"nameservers,omitempty"`
 	// SPFInclude is set for VectorSPF findings: the claimable include: domain.
 	SPFInclude string `json:"spf_include,omitempty"`
+	// MXHosts is set for VectorMX findings: the dangling mail-exchanger hostnames.
+	MXHosts []string `json:"mx_hosts,omitempty"`
 
 	// Scheme records which scheme produced an HTTP-based match: "https" or
 	// "http" (see handoff open question #4).

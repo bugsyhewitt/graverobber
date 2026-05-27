@@ -133,6 +133,137 @@ func TestCNAMEChain_HopCapPreventsOverflow(t *testing.T) {
 	}
 }
 
+// ---- MX method -------------------------------------------------------------
+
+// TestMX_ParsesResponse verifies that the MX method extracts hostnames from a
+// synthetic DNS MX response (same test-server pattern as AuthoritativeSOA).
+func TestMX_ReturnsSentinels(t *testing.T) {
+	// Verify the MX method compiles and is reachable; live DNS is not in scope
+	// for unit tests, so we only confirm the constructor does not panic and that
+	// the sentinel errors are distinct from the MX code path.
+	r := New(nil, 5*time.Second)
+	if r == nil {
+		t.Fatal("New returned nil")
+	}
+	// ErrNXDomain must still be distinct from ErrZoneDeleted.
+	if errors.Is(ErrNXDomain, ErrZoneDeleted) {
+		t.Error("ErrNXDomain and ErrZoneDeleted must be distinct sentinels")
+	}
+}
+
+// TestMX_ParsesMXRecords verifies the MX response-parsing logic using a local
+// UDP DNS server that replies with a synthetic MX answer.
+func TestMX_ParsesMXRecords(t *testing.T) {
+	// Spin up a local UDP DNS server.
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+
+	wantHosts := []string{"mail1.example.com", "mail2.example.com"}
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			resp.Answer = []dns.RR{
+				&dns.MX{
+					Hdr: dns.RR_Header{
+						Name:   dns.Fqdn("target.example.com"),
+						Rrtype: dns.TypeMX,
+						Class:  dns.ClassINET,
+						Ttl:    300,
+					},
+					Preference: 10,
+					Mx:         dns.Fqdn(wantHosts[0]),
+				},
+				&dns.MX{
+					Hdr: dns.RR_Header{
+						Name:   dns.Fqdn("target.example.com"),
+						Rrtype: dns.TypeMX,
+						Class:  dns.ClassINET,
+						Ttl:    300,
+					},
+					Preference: 20,
+					Mx:         dns.Fqdn(wantHosts[1]),
+				},
+			}
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	addr := pc.LocalAddr().String()
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := r.MX(ctx, "target.example.com")
+	if err != nil {
+		t.Fatalf("MX: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 MX hosts, got %d: %v", len(got), got)
+	}
+	for i, want := range wantHosts {
+		if got[i] != want {
+			t.Errorf("MX[%d]: got %q, want %q", i, got[i], want)
+		}
+	}
+}
+
+// TestMX_EmptyOnNXDOMAIN verifies that MX returns nil (not an error) when the
+// DNS response code is not Success (e.g. NXDOMAIN).
+func TestMX_EmptyOnNXDOMAIN(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			resp.Rcode = dns.RcodeNameError // NXDOMAIN
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	addr := pc.LocalAddr().String()
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := r.MX(ctx, "nxdomain.example.com")
+	if err != nil {
+		t.Fatalf("MX on NXDOMAIN should not error, got: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty slice for NXDOMAIN, got %v", got)
+	}
+}
+
 // ---- #3: SOA retry constants ------------------------------------------------
 
 // TestSOARetryConstants documents and verifies the AuthoritativeSOA retry

@@ -291,6 +291,50 @@ func TestRun_AllVectorFindingsAreEmitted(t *testing.T) {
 	}
 }
 
+// TestRun_NoMXDisablesMXVector verifies that when NoMX is set the mxVector
+// function is not called, and that when NoMX is false it is called once.
+func TestRun_NoMXDisablesMXVector(t *testing.T) {
+	origMX := mxVector
+	t.Cleanup(func() { mxVector = origMX })
+
+	var mxCalls int32
+	mxVector = func(_ context.Context, _ *Scanner, _ string) ([]finding.Finding, error) {
+		atomic.AddInt32(&mxCalls, 1)
+		return nil, nil
+	}
+
+	db, err := fingerprints.Load([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("load db: %v", err)
+	}
+
+	runWith := func(noMX bool) int32 {
+		atomic.StoreInt32(&mxCalls, 0)
+		sc := New(db, Options{
+			Concurrency: 1,
+			Timeout:     200 * time.Millisecond,
+			NoNS:        true,
+			NoSPF:       true,
+			NoMX:        noMX,
+		})
+		targets := make(chan string, 1)
+		targets <- "sub.example.com"
+		close(targets)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		for range sc.Run(ctx, targets) {
+		}
+		return atomic.LoadInt32(&mxCalls)
+	}
+
+	if got := runWith(true); got != 0 {
+		t.Errorf("NoMX=true: mxVector called %d times, want 0", got)
+	}
+	if got := runWith(false); got != 1 {
+		t.Errorf("NoMX=false: mxVector called %d times, want 1", got)
+	}
+}
+
 // ---- #2: dedup sync.Map is Run-scoped, not Scanner-scoped ------------------
 
 // TestScanner_EmittedMapIsRunLocal verifies by struct inspection that Scanner

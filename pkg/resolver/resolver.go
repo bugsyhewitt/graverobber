@@ -181,6 +181,25 @@ func (r *Resolver) NS(ctx context.Context, host string) ([]string, error) {
 	return out, nil
 }
 
+// MX returns the mail-exchanger hostnames for host (the right-hand side of each
+// MX record, without trailing dot, unsorted).
+func (r *Resolver) MX(ctx context.Context, host string) ([]string, error) {
+	resp, err := r.query(ctx, host, dns.TypeMX)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		return nil, nil
+	}
+	var out []string
+	for _, rr := range resp.Answer {
+		if m, ok := rr.(*dns.MX); ok {
+			out = append(out, strings.TrimSuffix(m.Mx, "."))
+		}
+	}
+	return out, nil
+}
+
 // TXT returns the TXT records for host (used to extract the SPF policy).
 func (r *Resolver) TXT(ctx context.Context, host string) ([]string, error) {
 	resp, err := r.query(ctx, host, dns.TypeTXT)

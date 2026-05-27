@@ -479,6 +479,61 @@ func TestProbeHTTP_MismatchedCert(t *testing.T) {
 	}
 }
 
+// ---- MX provider matching --------------------------------------------------
+
+func TestMatchMailProvider_Known(t *testing.T) {
+	cases := []struct {
+		mx   string
+		want bool
+	}{
+		{"aspmx.l.google.com", true},
+		{"mail.protection.outlook.com", true},
+		{"smtp.sendgrid.net", true},
+		{"mta.mailgun.org", true},
+		{"inbound-smtp.us-east-1.amazonses.com", true},
+		{"ns1.completely-unknown-mailhost.io", false},
+	}
+	for _, tc := range cases {
+		got := matchMailProvider(tc.mx) != ""
+		if got != tc.want {
+			t.Errorf("matchMailProvider(%q) known=%v, want=%v", tc.mx, got, tc.want)
+		}
+	}
+}
+
+func TestMatchMailProvider_Unknown(t *testing.T) {
+	mx := []string{"mail.private-company.example"}
+	p := matchMailProvider(mx[0])
+	if p != "" {
+		t.Errorf("expected empty provider, got %q", p)
+	}
+}
+
+// TestMXFinding_VectorConstant checks that VectorMX has the correct wire value.
+func TestMXFinding_VectorConstant(t *testing.T) {
+	if string(finding.VectorMX) != "mx" {
+		t.Errorf("VectorMX wire value must be \"mx\", got %q", finding.VectorMX)
+	}
+}
+
+// TestMXFinding_MXHostsField confirms the MXHosts field is populated correctly
+// when constructing a VectorMX finding (struct-level test; no DNS needed).
+func TestMXFinding_MXHostsField(t *testing.T) {
+	f := finding.Finding{
+		Subdomain:  "mail.example.com",
+		Vector:     finding.VectorMX,
+		Confidence: finding.Confirmed,
+		MXHosts:    []string{"dangling.mail.example.com"},
+		Evidence:   "MX host is NXDOMAIN — mail host does not exist",
+	}
+	if len(f.MXHosts) != 1 || f.MXHosts[0] != "dangling.mail.example.com" {
+		t.Errorf("unexpected MXHosts: %v", f.MXHosts)
+	}
+	if f.Vector != finding.VectorMX {
+		t.Errorf("expected VectorMX, got %q", f.Vector)
+	}
+}
+
 // TestNSUnanimity verifies that matchNSProvider only confirms known providers
 // and that the NS algorithm skeleton respects the unanimity invariant.
 // (Live DNS testing is not in-scope for unit tests; this covers logic paths.)

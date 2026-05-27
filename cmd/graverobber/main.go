@@ -71,6 +71,7 @@ type cliFlags struct {
 	verbose      bool
 	noNS         bool
 	noSPF        bool
+	noMX         bool
 	fingerprints []string
 	offline      bool
 	resolvers    string
@@ -113,6 +114,7 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVar(&f.verbose, "verbose", false, "verbose debug logging to stderr")
 	fl.BoolVar(&f.noNS, "no-ns", false, "skip NS takeover checks")
 	fl.BoolVar(&f.noSPF, "no-spf", false, "skip SPF include checks")
+	fl.BoolVar(&f.noMX, "no-mx", false, "skip MX dangling-record checks")
 	fl.StringArrayVar(&f.fingerprints, "fingerprints", nil, "additional fingerprint JSON to merge (repeatable)")
 	fl.BoolVar(&f.offline, "offline", false, "use cached/embedded fingerprints only, no network")
 	fl.StringVar(&f.resolvers, "resolvers", "", "file of custom DNS resolvers")
@@ -172,6 +174,7 @@ func runScan(ctx context.Context, f *cliFlags) error {
 		RateLimit:   f.rateLimit,
 		NoNS:        f.noNS,
 		NoSPF:       f.noSPF,
+		NoMX:        f.noMX,
 		HTTPOnly:    f.httpOnly,
 		HTTPSOnly:   f.httpsOnly,
 		Resolvers:   resolvers,
