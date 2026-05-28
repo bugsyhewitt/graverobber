@@ -69,6 +69,7 @@ type cliFlags struct {
 	timeout       int
 	output        string
 	json          bool
+	sarif         bool
 	silent        bool
 	verbose       bool
 	noNS          bool
@@ -117,6 +118,7 @@ func newRootCmd() *cobra.Command {
 	fl.IntVar(&f.timeout, "timeout", 10, "per-target HTTP timeout in seconds")
 	fl.StringVarP(&f.output, "output", "o", "", "write findings to file (default stdout)")
 	fl.BoolVar(&f.json, "json", false, "JSONL output (default: coloured terminal)")
+	fl.BoolVar(&f.sarif, "sarif", false, "SARIF 2.1.0 output for GitHub Code Scanning / CI upload")
 	fl.BoolVar(&f.silent, "silent", false, "results only, suppress progress/banner")
 	fl.BoolVar(&f.verbose, "verbose", false, "verbose debug logging to stderr")
 	fl.BoolVar(&f.noNS, "no-ns", false, "skip NS takeover checks")
@@ -197,6 +199,9 @@ func runScan(ctx context.Context, f *cliFlags) error {
 	if f.httpOnly && f.httpsOnly {
 		return errors.New("--http-only and --https-only are mutually exclusive")
 	}
+	if f.json && f.sarif {
+		return errors.New("--json and --sarif are mutually exclusive output formats")
+	}
 
 	minConf, ok := finding.ParseConfidence(strings.ToLower(strings.TrimSpace(f.minConfidence)))
 	if !ok {
@@ -263,7 +268,7 @@ func runScan(ctx context.Context, f *cliFlags) error {
 	if err := <-scanErr; err != nil {
 		return err
 	}
-	if !f.silent && !f.json {
+	if !f.silent && !f.json && !f.sarif {
 		fmt.Fprintf(os.Stderr, "graverobber: %d finding(s)\n", count)
 	}
 	if count > 0 {
@@ -346,6 +351,9 @@ func openWriter(f *cliFlags) (output.Writer, func(), error) {
 		cleanup = func() { _ = file.Close() }
 	}
 
+	if f.sarif {
+		return output.NewSARIF(sink, version), cleanup, nil
+	}
 	if f.json {
 		return output.NewJSONL(sink), cleanup, nil
 	}
