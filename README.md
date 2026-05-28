@@ -57,6 +57,9 @@ graverobber -t dev.example.com
 # JSONL output to a file
 graverobber -l subs.txt -c 50 --timeout 10 -o results.jsonl --json
 
+# SARIF output for GitHub Code Scanning / CI upload
+graverobber -l subs.txt --sarif -o graverobber.sarif
+
 # Merge a private fingerprint list (local entries win)
 graverobber -l subs.txt --fingerprints ~/private.json
 
@@ -205,6 +208,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--timeout` | 10 | Per-target HTTP timeout (seconds) |
 | `-o, --output` | stdout | Write findings to a file |
 | `--json` | false | JSONL output (default: coloured terminal) |
+| `--sarif` | false | SARIF 2.1.0 output for GitHub Code Scanning / CI upload (mutually exclusive with `--json`) |
 | `--silent` | false | Results only, suppress progress/banner |
 | `--verbose` | false | Verbose debug logging to stderr |
 | `--no-ns` | false | Skip NS takeover checks |
@@ -333,6 +337,37 @@ and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
 mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation
 (`dkim`), or the claimable `rua`/`ruf` report domain (`dmarc`). ANSI colour is
 emitted only to a TTY; piped or file output is plain text.
+
+### SARIF for GitHub Code Scanning (`--sarif`)
+
+`--sarif` renders the whole scan as a single
+[SARIF 2.1.0](https://sarifweb.azurewebsites.net/) log — the OASIS-standard
+format GitHub Code Scanning, Azure DevOps, and most security platforms ingest
+natively. Uploading the log turns each takeover candidate into a tracked,
+deduplicated alert in the repository's **Security → Code scanning** tab instead
+of a line of console output that scrolls away.
+
+```sh
+# Scan in CI and upload to the GitHub Security tab
+subfinder -d "$GITHUB_REPOSITORY_OWNER.com" -silent \
+  | graverobber --sarif -o graverobber.sarif
+```
+
+```yaml
+# .github/workflows/takeover-scan.yml (excerpt)
+- run: subfinder -d example.com -silent | graverobber --sarif -o graverobber.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: graverobber.sarif
+```
+
+Each finding becomes a SARIF `result`: `CONFIRMED` maps to `error`, `LIKELY` and
+`POTENTIAL` to `warning`; the subdomain is the result location; rule IDs are
+namespaced under `graverobber/<vector>`; and a stable `partialFingerprint` keyed
+on `(subdomain, vector)` lets Code Scanning dedupe the same candidate across
+re-scans rather than re-opening an alert each run. `--sarif` is mutually
+exclusive with `--json`. A scan with zero findings still emits a valid (empty)
+log so the upload step never fails.
 
 ### Exit codes
 

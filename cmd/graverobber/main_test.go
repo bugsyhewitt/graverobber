@@ -51,3 +51,16 @@ func TestRunScan_RejectsInvalidMinConfidence(t *testing.T) {
 		}
 	}
 }
+
+// TestRunScan_RejectsJSONAndSARIFTogether verifies runScan fails fast when both
+// machine-output formats are requested, before opening any I/O — they write
+// incompatible documents to the same sink.
+func TestRunScan_RejectsJSONAndSARIFTogether(t *testing.T) {
+	err := runScan(context.Background(), &cliFlags{target: "x.example.com", json: true, sarif: true})
+	if err == nil {
+		t.Fatal("runScan with --json --sarif: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("runScan error = %q, want it to mention mutually exclusive", err.Error())
+	}
+}

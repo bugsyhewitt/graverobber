@@ -332,6 +332,45 @@ package in the tree. DNS-only, no new flags, no API change, no dependencies.
 
 ---
 
+## Rank 10 — SARIF 2.1.0 output for CI / GitHub Code Scanning — ✅ IMPLEMENTED (Phase 2, Rotation 12)
+
+**Status:** Shipped. After Ranks 1–9 exhausted the original research roadmap
+(all six takeover vectors covered, active verification wired, terminal output
+complete), R12 opened a new direction: **integration**, not breadth. The scanner
+detects well but had no path into the DevSecOps loop — findings were a stream of
+JSONL or console lines that scrolled away, not tracked alerts.
+
+`pkg/output/sarif.go` adds `SarifWriter`, a third `output.Writer` that buffers
+findings on `Write` and emits a single SARIF 2.1.0 log on `Close` (a SARIF log
+is one document with a rule catalogue + results array, unlike the per-line JSONL
+path). The CLI gains `--sarif` (mutually exclusive with `--json`), wired through
+`openWriter` and a fast-fail validation guard in `runScan`.
+
+Mapping: `CONFIRMED → error`, `LIKELY`/`POTENTIAL → warning`; the subdomain is
+the result location; rules are namespaced `graverobber/<vector>` with per-vector
+short/full descriptions; a stable `partialFingerprint` on `(subdomain, vector)`
+lets Code Scanning dedupe candidates across re-scans. An empty scan still emits
+a valid log so the `upload-sarif` step never fails. DNS-only ethos preserved:
+std-lib `encoding/json` only, no new dependencies, no credentials.
+
+Guarded by eight new tests in `pkg/output/sarif_test.go`
+(`TestSARIF_DocumentEnvelope`, `_EmptyScanIsValid`,
+`_RuleCatalogueDedupesByVector`, `_LevelFromConfidence`,
+`_ResultLocationAndFingerprint`, `_MessageSurfacesVectorDetail`,
+`_RuleIDNamespaced`) plus `TestRunScan_RejectsJSONAndSARIFTogether` in
+`cmd/graverobber/main_test.go`.
+
+**Why this over a seventh vector:** All high-value takeover vectors already ship.
+The next marginal value is no longer detection coverage but getting the existing
+findings in front of the people who fix them — and the standard channel for that
+is SARIF into Code Scanning. Unique among Go takeover tools; one new Writer file,
+one flag, no API or scanner change.
+
+**Complexity:** Low-medium — one new file in `pkg/output`, a flag + two CLI
+wiring lines, README section, eight tests.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -361,3 +400,4 @@ package in the tree. DNS-only, no new flags, no API change, no dependencies.
 | 7 | Second-order JS reference scanning ✅ | High | Medium (niche) | Yes (new mode) |
 | 8 | DMARC report-domain dangling vector ✅ | Low-Med | High (completes email-auth) | Yes (new vector + flag) |
 | 9 | Terminal output detail for MX/DKIM/DMARC ✅ | Low | High (default-mode correctness) | No |
+| 10 | SARIF 2.1.0 output for CI / Code Scanning ✅ | Low-Med | High (CI integration) | No (new flag only) |
