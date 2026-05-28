@@ -23,15 +23,17 @@ import (
 
 // Options configures a scan run.
 type Options struct {
-	Concurrency int           // worker goroutine count (handoff default: 50)
-	Timeout     time.Duration // per-target HTTP timeout (handoff default: 10s)
-	RateLimit   int           // global requests/sec; 0 == unlimited
-	NoNS        bool          // skip the NS takeover vector
-	NoSPF       bool          // skip the SPF include vector
-	NoMX        bool          // skip the MX takeover vector
-	HTTPOnly    bool          // probe services over HTTP only
-	HTTPSOnly   bool          // probe services over HTTPS only
-	Resolvers   []string      // custom recursive DNS resolvers
+	Concurrency   int           // worker goroutine count (handoff default: 50)
+	Timeout       time.Duration // per-target HTTP timeout (handoff default: 10s)
+	RateLimit     int           // global requests/sec; 0 == unlimited
+	NoNS          bool          // skip the NS takeover vector
+	NoSPF         bool          // skip the SPF include vector
+	NoMX          bool          // skip the MX takeover vector
+	NoDKIM        bool          // skip the DKIM selector vector
+	HTTPOnly      bool          // probe services over HTTP only
+	HTTPSOnly     bool          // probe services over HTTPS only
+	Resolvers     []string      // custom recursive DNS resolvers
+	DKIMSelectors []string      // override the default DKIM selector probe list
 }
 
 // DefaultOptions returns the handoff-specified defaults.
@@ -143,6 +145,9 @@ var (
 	mxVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
 		return detectors.MX(ctx, target, s.resolver)
 	}
+	dkimVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.DKIM(ctx, target, s.resolver, s.opts.DKIMSelectors)
+	}
 )
 
 // scanTarget runs the per-target detection pipeline and emits any findings.
@@ -157,7 +162,7 @@ var (
 // (the emitted sync.Map) and emission are performed serially afterwards exactly
 // as before, so output semantics are unchanged.
 func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.Map, out chan<- finding.Finding) {
-	// Select the enabled vectors. CNAME always runs; NS, SPF, and MX are opt-out.
+	// Select the enabled vectors. CNAME always runs; NS, SPF, MX, and DKIM are opt-out.
 	vectors := []vectorFunc{cnameVector}
 	if !s.opts.NoNS {
 		vectors = append(vectors, nsVector)
@@ -167,6 +172,9 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.M
 	}
 	if !s.opts.NoMX {
 		vectors = append(vectors, mxVector)
+	}
+	if !s.opts.NoDKIM {
+		vectors = append(vectors, dkimVector)
 	}
 
 	// Fan out: run each enabled vector concurrently, collecting findings into a

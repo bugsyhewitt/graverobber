@@ -25,6 +25,10 @@ const (
 	// VectorMX: a dangling MX record points at a mail host that is NXDOMAIN or
 	// belongs to a cloud mail provider whose hosted zone has been deleted.
 	VectorMX Vector = "mx"
+	// VectorDKIM: a DKIM selector (<selector>._domainkey.<domain>) is published
+	// as a CNAME whose target is NXDOMAIN — the ESP resource is gone and an
+	// attacker who reclaims it can serve a DKIM key that signs spoofed mail.
+	VectorDKIM Vector = "dkim"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.
@@ -62,6 +66,9 @@ type Finding struct {
 	SPFInclude string `json:"spf_include,omitempty"`
 	// MXHosts is set for VectorMX findings: the dangling mail-exchanger hostnames.
 	MXHosts []string `json:"mx_hosts,omitempty"`
+	// DKIMSelector is set for VectorDKIM findings: the selector whose
+	// _domainkey CNAME is dangling (e.g. "s1" for s1._domainkey.example.com).
+	DKIMSelector string `json:"dkim_selector,omitempty"`
 
 	// Scheme records which scheme produced an HTTP-based match: "https" or
 	// "http" (see handoff open question #4).

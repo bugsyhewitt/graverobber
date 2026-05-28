@@ -157,6 +157,35 @@ func (r *Resolver) CNAMEChain(ctx context.Context, host string) ([]string, error
 	return chain, nil
 }
 
+// RawCNAME returns the single CNAME target published directly at host, or ""
+// when host has no CNAME record. Unlike CNAMEChain (which issues a TypeA query
+// and reports the recursively-resolved A-record chain), RawCNAME issues a
+// TypeCNAME query and reports only the immediate alias.
+//
+// This distinction matters for the DKIM vector: a DKIM selector is only a
+// takeover candidate when it is published as a CNAME (delegating the public key
+// to an ESP's infrastructure). A selector published as a TXT record holds the
+// key inline and is not delegated, so it is not at risk. RawCNAME lets the
+// detector confirm the selector is a CNAME before probing its target.
+//
+// A NXDOMAIN response for host itself yields ("", ErrNXDomain); callers that
+// only care whether a CNAME exists can ignore the error and check the string.
+func (r *Resolver) RawCNAME(ctx context.Context, host string) (string, error) {
+	resp, err := r.query(ctx, host, dns.TypeCNAME)
+	if err != nil {
+		return "", err
+	}
+	for _, rr := range resp.Answer {
+		if c, ok := rr.(*dns.CNAME); ok {
+			return strings.TrimSuffix(c.Target, "."), nil
+		}
+	}
+	if resp.Rcode == dns.RcodeNameError {
+		return "", ErrNXDomain
+	}
+	return "", nil
+}
+
 // NS returns the NS records delegated for host.
 func (r *Resolver) NS(ctx context.Context, host string) ([]string, error) {
 	resp, err := r.query(ctx, host, dns.TypeNS)

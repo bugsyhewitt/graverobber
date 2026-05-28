@@ -1,28 +1,30 @@
 # graverobber
 
-**Subdomain takeover scanner for CNAME, NS, and SPF dangling records.**
+**Subdomain takeover scanner for CNAME, NS, SPF, MX, and DKIM dangling records.**
 
-> Digs up the subdomains your target left for dead — CNAME, NS, and SPF
-> takeover detection in one pipeline-friendly Go binary.
+> Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, and
+> DKIM takeover detection in one pipeline-friendly Go binary.
 
 `graverobber` is the only maintained Go binary that covers **CNAME**, **NS**,
-and **SPF** takeover vectors in a single tool. It is a static binary with no
-runtime, reads targets from stdin/file/flag, streams JSONL, and uses the
-exit-code conventions of the `httpx`/`subfinder` family so it drops straight
-into a recon pipeline.
+**SPF**, **MX**, and **DKIM** takeover vectors in a single tool. It is a static
+binary with no runtime, reads targets from stdin/file/flag, streams JSONL, and
+uses the exit-code conventions of the `httpx`/`subfinder` family so it drops
+straight into a recon pipeline.
 
 ---
 
-## Why these three vectors
+## Why these vectors
 
 | Vector | Signal | Real-world campaign |
 |---|---|---|
 | CNAME | Dangling CNAME → fingerprint match against a known-vulnerable service | The classic takeover; ~60+ services covered |
 | NS    | Delegated DNS hosted zone deleted at the provider, re-claimable | Hazy Hawk (.edu campaign, 2025–2026) |
 | SPF   | An SPF `include:` directive points at an unregistered, claimable domain | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day |
+| MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
+| DKIM  | A `<selector>._domainkey` CNAME delegates to an ESP resource that is now NXDOMAIN | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024) |
 
-Most scanners cover CNAME only. NS and SPF takeover are live, actively-exploited
-vectors that almost no Go tool handles.
+Most scanners cover CNAME only. NS, SPF, MX, and DKIM takeover are live,
+actively-exploited vectors that almost no Go tool handles.
 
 ---
 
@@ -60,7 +62,10 @@ graverobber -l subs.txt --fingerprints ~/private.json
 graverobber -l subs.txt --offline
 
 # Skip vectors
-graverobber -l subs.txt --no-ns --no-spf
+graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim
+
+# Probe a custom set of DKIM selectors instead of the built-in ESP defaults
+graverobber -l subs.txt --selectors default,google,s1,s2,k1
 ```
 
 ### Refreshing the databases
@@ -154,6 +159,9 @@ mirrors the scan command: `1` when any takeover-candidate certificate was found,
 | `--verbose` | false | Verbose debug logging to stderr |
 | `--no-ns` | false | Skip NS takeover checks |
 | `--no-spf` | false | Skip SPF include checks |
+| `--no-mx` | false | Skip MX dangling-record checks |
+| `--no-dkim` | false | Skip DKIM selector dangling-CNAME checks |
+| `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
 | `--offline` | false | Cached/embedded fingerprints only, no network |
 | `--resolvers` | — | File of custom DNS resolvers |
@@ -183,6 +191,24 @@ can upgrade a `LIKELY` finding to `CONFIRMED`:
 All probes are read-only — `graverobber` confirms claimability, it never claims the
 resource. Verification only ever upgrades confidence; it never downgrades, and it never
 touches a finding the fingerprint stage already marked `CONFIRMED`.
+
+### DKIM selector takeover (`--no-dkim`, `--selectors`)
+
+DKIM public keys live at `<selector>._domainkey.<domain>`. Organizations
+frequently publish them as **CNAMEs** that delegate the key to an email service
+provider (e.g. `s1._domainkey.example.com → s1.domainkey.u123.wl.sendgrid.net`).
+When the ESP account is closed or the selector rotated, the CNAME is abandoned —
+an attacker who reclaims the ESP resource can serve a DKIM key and sign email
+that passes DKIM verification. This is the DKIM half of the SubdoMailing vector
+(Guardio Labs, 2024).
+
+The selector name is not discoverable from DNS alone, so graverobber probes a
+list of common ESP selectors by default (`default`, `google`, `k1`, `k2`, `s1`,
+`s2`, `selector1`, `selector2`, `dkim`, `mail`, `smtp`). Override the list with
+`--selectors` (comma-separated) when you know the selector in use. For each
+selector, graverobber resolves the `_domainkey` CNAME; if its target is
+`NXDOMAIN` it emits a `CONFIRMED` `dkim` finding. Selectors published as inline
+TXT keys (not delegated) are never flagged.
 
 ---
 

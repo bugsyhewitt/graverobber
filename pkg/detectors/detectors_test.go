@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 	"github.com/bugsyhewitt/graverobber/pkg/fingerprints"
 	"github.com/bugsyhewitt/graverobber/pkg/nsproviders"
 	"github.com/bugsyhewitt/graverobber/pkg/resolver"
+	"github.com/miekg/dns"
 )
 
 // ---- fingerprint DB helpers ------------------------------------------------
@@ -552,6 +554,188 @@ func TestSetProviders_OverridesActiveList(t *testing.T) {
 	}
 	if activeProviders().Match("ns1.linode.com") != "" {
 		t.Error("SetProviders override should have replaced the default list")
+	}
+}
+
+// ---- DKIM selector vector --------------------------------------------------
+
+// TestDKIMFinding_VectorConstant checks that VectorDKIM has the correct wire value.
+func TestDKIMFinding_VectorConstant(t *testing.T) {
+	if string(finding.VectorDKIM) != "dkim" {
+		t.Errorf("VectorDKIM wire value must be \"dkim\", got %q", finding.VectorDKIM)
+	}
+}
+
+// TestDKIMFinding_Fields confirms the DKIM-specific fields are populated as the
+// detector would build them (struct-level test; no DNS needed).
+func TestDKIMFinding_Fields(t *testing.T) {
+	f := finding.Finding{
+		Subdomain:    "s1._domainkey.example.com",
+		Vector:       finding.VectorDKIM,
+		Confidence:   finding.Confirmed,
+		CNAME:        "s1.domainkey.u123.wl.sendgrid.net",
+		DKIMSelector: "s1",
+		Evidence:     "DKIM selector CNAME target is NXDOMAIN — ESP resource reclaimable",
+	}
+	if f.Vector != finding.VectorDKIM {
+		t.Errorf("expected VectorDKIM, got %q", f.Vector)
+	}
+	if f.DKIMSelector != "s1" {
+		t.Errorf("expected selector s1, got %q", f.DKIMSelector)
+	}
+	if f.CNAME == "" {
+		t.Error("DKIM finding must carry the dangling CNAME target")
+	}
+}
+
+// TestDefaultDKIMSelectors_CoversCommonESPs verifies the built-in selector list
+// includes the well-known ESP selectors the detector relies on for coverage.
+func TestDefaultDKIMSelectors_CoversCommonESPs(t *testing.T) {
+	want := []string{"default", "google", "s1", "s2", "k1", "selector1", "selector2"}
+	have := map[string]bool{}
+	for _, s := range DefaultDKIMSelectors {
+		have[s] = true
+	}
+	for _, w := range want {
+		if !have[w] {
+			t.Errorf("DefaultDKIMSelectors missing common selector %q", w)
+		}
+	}
+}
+
+// dkimDNSServer spins up a local UDP DNS server that models a single dangling
+// DKIM selector. The selector danglingSel publishes a CNAME to danglingTarget;
+// danglingTarget is NXDOMAIN. Every other name returns NOERROR with no answer.
+// It returns the server address and a cleanup func.
+func dkimDNSServer(t *testing.T, danglingFQDN, danglingTarget string) (string, func()) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+
+			q := req.Question[0]
+			name := q.Name
+
+			switch {
+			case q.Qtype == dns.TypeCNAME && name == dns.Fqdn(danglingFQDN):
+				resp.Answer = []dns.RR{&dns.CNAME{
+					Hdr:    dns.RR_Header{Name: name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 300},
+					Target: dns.Fqdn(danglingTarget),
+				}}
+			case q.Qtype == dns.TypeA && name == dns.Fqdn(danglingTarget):
+				// The delegated ESP resource is gone.
+				resp.Rcode = dns.RcodeNameError
+			default:
+				// All other selectors: NOERROR, no CNAME → not delegated.
+			}
+
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	return pc.LocalAddr().String(), func() { pc.Close() }
+}
+
+// TestDKIM_DanglingSelectorConfirmed drives the full DKIM detector against a
+// local DNS server: one selector CNAMEs to a target that is NXDOMAIN, which must
+// produce exactly one Confirmed VectorDKIM finding.
+func TestDKIM_DanglingSelectorConfirmed(t *testing.T) {
+	const (
+		target   = "example.com"
+		selector = "s1"
+	)
+	danglingFQDN := selector + "._domainkey." + target
+	danglingTarget := "s1.domainkey.deleted-esp.invalid"
+
+	addr, cleanup := dkimDNSServer(t, danglingFQDN, danglingTarget)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DKIM(ctx, target, r, []string{"s1", "s2", "default"})
+	if err != nil {
+		t.Fatalf("DKIM: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 dangling-selector finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Vector != finding.VectorDKIM {
+		t.Errorf("vector: got %q, want dkim", f.Vector)
+	}
+	if f.Confidence != finding.Confirmed {
+		t.Errorf("confidence: got %q, want CONFIRMED", f.Confidence)
+	}
+	if f.DKIMSelector != selector {
+		t.Errorf("selector: got %q, want %q", f.DKIMSelector, selector)
+	}
+	if f.CNAME != danglingTarget {
+		t.Errorf("cname: got %q, want %q", f.CNAME, danglingTarget)
+	}
+	if f.Subdomain != danglingFQDN {
+		t.Errorf("subdomain: got %q, want %q", f.Subdomain, danglingFQDN)
+	}
+}
+
+// TestDKIM_NoFindingsWhenNotDelegated verifies that selectors without a CNAME
+// (inline TXT keys or absent records) produce no findings.
+func TestDKIM_NoFindingsWhenNotDelegated(t *testing.T) {
+	// Server with a dangling FQDN that none of the probed selectors match, so
+	// every selector returns NOERROR/no-CNAME.
+	addr, cleanup := dkimDNSServer(t, "unused._domainkey.example.com", "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DKIM(ctx, "example.com", r, []string{"s1", "default", "google"})
+	if err != nil {
+		t.Fatalf("DKIM: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings for non-delegated selectors, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestDKIM_DedupSelectors verifies a duplicated selector in the override list is
+// probed only once (no duplicate findings).
+func TestDKIM_DedupSelectors(t *testing.T) {
+	const target = "example.com"
+	danglingFQDN := "s1._domainkey." + target
+	danglingTarget := "s1.domainkey.deleted-esp.invalid"
+
+	addr, cleanup := dkimDNSServer(t, danglingFQDN, danglingTarget)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DKIM(ctx, target, r, []string{"s1", "S1", " s1 "})
+	if err != nil {
+		t.Fatalf("DKIM: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 deduplicated finding, got %d", len(findings))
 	}
 }
 

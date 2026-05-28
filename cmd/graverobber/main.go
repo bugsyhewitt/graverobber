@@ -73,6 +73,8 @@ type cliFlags struct {
 	noNS         bool
 	noSPF        bool
 	noMX         bool
+	noDKIM       bool
+	selectors    string
 	fingerprints []string
 	offline      bool
 	resolvers    string
@@ -88,10 +90,11 @@ func newRootCmd() *cobra.Command {
 
 	root := &cobra.Command{
 		Use:   "graverobber",
-		Short: "Subdomain takeover scanner for CNAME, NS, and SPF dangling records",
+		Short: "Subdomain takeover scanner for CNAME, NS, SPF, MX, and DKIM dangling records",
 		Long: "graverobber digs up the subdomains your target left for dead.\n" +
-			"It detects CNAME fingerprint, NS zone-deletion, and SPF include\n" +
-			"takeover across a stream of hosts read from stdin, a file, or -t.",
+			"It detects CNAME fingerprint, NS zone-deletion, SPF include, MX\n" +
+			"dangling-record, and DKIM selector takeover across a stream of hosts\n" +
+			"read from stdin, a file, or -t.",
 		Version: version,
 		Args:    cobra.NoArgs,
 		// The command reports findings via the errFindings sentinel and its
@@ -116,6 +119,8 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVar(&f.noNS, "no-ns", false, "skip NS takeover checks")
 	fl.BoolVar(&f.noSPF, "no-spf", false, "skip SPF include checks")
 	fl.BoolVar(&f.noMX, "no-mx", false, "skip MX dangling-record checks")
+	fl.BoolVar(&f.noDKIM, "no-dkim", false, "skip DKIM selector dangling-CNAME checks")
+	fl.StringVar(&f.selectors, "selectors", "", "comma-separated DKIM selectors to probe (default: common ESP selectors)")
 	fl.StringArrayVar(&f.fingerprints, "fingerprints", nil, "additional fingerprint JSON to merge (repeatable)")
 	fl.BoolVar(&f.offline, "offline", false, "use cached/embedded fingerprints only, no network")
 	fl.StringVar(&f.resolvers, "resolvers", "", "file of custom DNS resolvers")
@@ -198,15 +203,17 @@ func runScan(ctx context.Context, f *cliFlags) error {
 	}
 
 	opts := scanner.Options{
-		Concurrency: f.concurrency,
-		Timeout:     time.Duration(f.timeout) * time.Second,
-		RateLimit:   f.rateLimit,
-		NoNS:        f.noNS,
-		NoSPF:       f.noSPF,
-		NoMX:        f.noMX,
-		HTTPOnly:    f.httpOnly,
-		HTTPSOnly:   f.httpsOnly,
-		Resolvers:   resolvers,
+		Concurrency:   f.concurrency,
+		Timeout:       time.Duration(f.timeout) * time.Second,
+		RateLimit:     f.rateLimit,
+		NoNS:          f.noNS,
+		NoSPF:         f.noSPF,
+		NoMX:          f.noMX,
+		NoDKIM:        f.noDKIM,
+		HTTPOnly:      f.httpOnly,
+		HTTPSOnly:     f.httpsOnly,
+		Resolvers:     resolvers,
+		DKIMSelectors: parseSelectors(f.selectors),
 	}
 
 	w, closeOut, err := openWriter(f)
@@ -393,6 +400,23 @@ func scanLines(r io.Reader, emit func(string) bool) error {
 		}
 	}
 	return sc.Err()
+}
+
+// parseSelectors splits a comma-separated DKIM selector list into a normalized
+// slice. An empty input yields nil, which the detector reads as "use the
+// built-in DefaultDKIMSelectors". Blank entries are dropped and each selector is
+// lower-cased so case-variant duplicates collapse downstream.
+func parseSelectors(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if sel := strings.ToLower(strings.TrimSpace(part)); sel != "" {
+			out = append(out, sel)
+		}
+	}
+	return out
 }
 
 // normalizeLine trims whitespace and drops blank lines and # comments. It

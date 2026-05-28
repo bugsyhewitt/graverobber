@@ -170,7 +170,20 @@ No changes to core scanner. The hard part is rate-limiting crt.sh queries
 
 ---
 
-## Rank 6 — DKIM selector dangling CNAME detection
+## Rank 6 — DKIM selector dangling CNAME detection — ✅ IMPLEMENTED (Phase 2, Rotation 7)
+
+**Status:** Shipped. `detectors.DKIM` adds `VectorDKIM` ("dkim") as the fifth
+vector. For each selector in `DefaultDKIMSelectors` (overridable via the
+`--selectors` flag) it builds `<selector>._domainkey.<target>`, resolves its
+CNAME via the new `resolver.RawCNAME` (a TypeCNAME query that returns only the
+immediate alias — distinguishing a delegated selector from an inline-TXT one),
+then follows the alias with `CNAMEChain`; an `ErrNXDomain` target yields a
+`CONFIRMED` finding carrying the dangling `CNAME` and the `dkim_selector`. Wired
+into the scanner fan-out behind `Options.NoDKIM` / `--no-dkim` (opt-out, on by
+default). Guarded by `TestDKIM_DanglingSelectorConfirmed`,
+`TestDKIM_NoFindingsWhenNotDelegated`, `TestDKIM_DedupSelectors` (detectors),
+`TestRawCNAME_*` (resolver), `TestRun_NoDKIMDisablesDKIMVector` (scanner), and
+`TestParseSelectors` (cmd).
 
 **What:** DKIM public keys are published as TXT records under
 `<selector>._domainkey.<domain>`, but many organizations publish them as CNAME
@@ -250,5 +263,5 @@ surface and test complexity.
 | 3 | MX record fourth vector | Medium | High (new coverage) | Yes (new vector + flag) |
 | 4 | NS provider list sync from indianajson | Low-Med | Medium (accuracy) | No |
 | 5 | CT log monitoring subcommand | Medium | High (unique feature) | No (new subcommand) |
-| 6 | DKIM selector dangling CNAME | Medium | Medium (new coverage) | Yes (new vector + flag) |
+| 6 | DKIM selector dangling CNAME ✅ | Medium | Medium (new coverage) | Yes (new vector + flag) |
 | 7 | Second-order JS reference scanning | High | Medium (niche) | Yes (new mode) |
