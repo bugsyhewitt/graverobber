@@ -307,6 +307,14 @@ JSONL — one finding per line:
 {"subdomain":"reports.deleted-vendor.net","vector":"dmarc","confidence":"POTENTIAL","dmarc_uri":"reports.deleted-vendor.net","evidence":"DMARC rua/ruf report domain is NXDOMAIN (claimable — report interception)","timestamp":"2026-05-28T12:00:00Z"}
 ```
 
+Without `--json`, findings render as one coloured human-readable line per
+finding. Each line carries the confidence tier, the vector tag, the subdomain,
+and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
+`include:` domain (`spf`), the failed nameservers (`ns`), the dangling
+mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation
+(`dkim`), or the claimable `rua`/`ruf` report domain (`dmarc`). ANSI colour is
+emitted only to a TTY; piped or file output is plain text.
+
 ### Exit codes
 
 | Code | Meaning |

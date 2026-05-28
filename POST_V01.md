@@ -296,6 +296,42 @@ additions, scanner option + CLI flag, seven new tests.
 
 ---
 
+## Rank 9 — Terminal output detail for the email-auth vectors — ✅ IMPLEMENTED (Phase 2, Rotation 10)
+
+**Status:** Shipped. After Ranks 1–8 added MX, DKIM, and DMARC vectors, the
+default (non-JSON) `TerminalWriter` was never extended to render them: its detail
+switch handled only CNAME, SPF, and NS, so MX/DKIM/DMARC findings printed with an
+**empty detail field** — the operator saw the tier, vector tag, and host but not
+the dangling mail host, the DKIM selector/delegation, or the claimable DMARC
+report domain. Half the tool's vectors were effectively invisible in its default
+output mode.
+
+`pkg/output/output.go` now renders all six vectors:
+- `mx`   → `mx [mail.gone.net]`
+- `dkim` → `dkim s1._domainkey -> s1.domainkey.gone.sendgrid.net`
+- `dmarc` → `dmarc rua/ruf:reports.gone.net`
+
+The JSONL path was already correct (it serializes the full `Finding`); only the
+human-readable path was incomplete. `pkg/output` had **zero test coverage** before
+this rotation. Added `pkg/output/output_test.go` (5 test functions, 6 subtests):
+`TestTerminalWriter_RendersDetailForEveryVector` is a table-driven regression
+guard asserting every vector surfaces its identifying datum plus the vector tag
+and confidence tier; `TestJSONLWriter_RoundTrip` and
+`TestJSONLWriter_OmitsEmptyVectorFields` lock the JSONL contract (single line,
+`omitempty` keeps a CNAME finding from leaking email-vector fields);
+`TestTerminalWriter_NoColourOmitsANSI` / `_ColourWrapsTiers` pin the TTY-vs-pipe
+colour behaviour.
+
+**Why this over a new vector:** All six high-value takeover vectors are already
+covered; the next-highest-value work is no longer breadth but correctness of what
+ships. A default-mode output bug that hides three of six vectors is a higher-
+impact, lower-risk fix than a seventh vector — and it closed the last untested
+package in the tree. DNS-only, no new flags, no API change, no dependencies.
+
+**Complexity:** Low — three switch arms in one file plus a new test file.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -324,3 +360,4 @@ additions, scanner option + CLI flag, seven new tests.
 | 6 | DKIM selector dangling CNAME ✅ | Medium | Medium (new coverage) | Yes (new vector + flag) |
 | 7 | Second-order JS reference scanning ✅ | High | Medium (niche) | Yes (new mode) |
 | 8 | DMARC report-domain dangling vector ✅ | Low-Med | High (completes email-auth) | Yes (new vector + flag) |
+| 9 | Terminal output detail for MX/DKIM/DMARC ✅ | Low | High (default-mode correctness) | No |
