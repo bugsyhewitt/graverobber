@@ -105,6 +105,18 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		if len(f.Nameservers) > 0 {
 			detail = fmt.Sprintf("ns %v", f.Nameservers)
 		}
+	case finding.VectorMX:
+		if len(f.MXHosts) > 0 {
+			detail = fmt.Sprintf("mx %v", f.MXHosts)
+		}
+	case finding.VectorDKIM:
+		if f.DKIMSelector != "" {
+			detail = fmt.Sprintf("dkim %s._domainkey -> %s", f.DKIMSelector, f.CNAME)
+		}
+	case finding.VectorDMARC:
+		if f.DMARCURI != "" {
+			detail = fmt.Sprintf("dmarc rua/ruf:%s", f.DMARCURI)
+		}
 	}
 
 	_, err := fmt.Fprintf(t.w, "[%s] [%s] %s  %s\n",
