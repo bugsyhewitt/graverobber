@@ -371,6 +371,44 @@ wiring lines, README section, eight tests.
 
 ---
 
+## Rank 11 — CSV output for spreadsheet / ticket triage — ✅ IMPLEMENTED (Phase 2, Rotation 13)
+
+**Status:** Shipped. With all six vectors, active verification, terminal detail,
+and SARIF CI integration in place, the remaining output-format gap was the
+spreadsheet-and-ticketing triage workflow that most security teams actually run.
+JSONL serves programmatic consumers and SARIF serves Code Scanning, but neither
+drops cleanly into Excel/Sheets, a Jira CSV import, or a `csvkit`/`pandas`
+pipeline without a `jq` step.
+
+`pkg/output/csv.go` adds `CSVWriter`, a fourth `output.Writer` emitting RFC 4180
+CSV via std-lib `encoding/csv`: a fixed header row plus one row per finding. The
+schema is intentionally flat and stable — every vector maps onto the same nine
+columns (`timestamp,subdomain,vector,confidence,service,target,scheme,fingerprint,evidence`)
+and the vector-specific dangling target (CNAME / SPF include / NS+MX hosts /
+DKIM selector delegation / DMARC report domain) is normalised into a single
+`target` column so the whole sheet sorts and filters uniformly. The header is
+written exactly once, so an empty scan still yields a valid header-only file that
+downstream importers accept. The CLI gains `--csv`, and the prior pairwise
+`--json`/`--sarif` mutual-exclusion check generalised to an N-way `boolCount`
+guard so all three machine formats reject each other.
+
+Guarded by five new tests in `pkg/output/csv_test.go`
+(`TestCSV_HeaderThenRow`, `_EmptyScanEmitsHeaderOnly`, `_TargetColumnPerVector`,
+`_QuotesCommaBearingFields`, `_TimestampIsRFC3339UTC`) plus a generalised
+`TestRunScan_RejectsConflictingFormats` (all pairwise + three-way combinations)
+and `TestBoolCount` in `cmd/graverobber/main_test.go`.
+
+**Why this over a seventh vector:** All high-value takeover vectors already ship;
+the marginal value is now distribution, not detection. SARIF reaches the
+CI/Code-Scanning audience; CSV reaches the analyst-in-a-spreadsheet audience,
+which is the larger triage population. std-lib only, no new dependencies, no API
+or scanner change.
+
+**Complexity:** Low — one new file in `pkg/output`, a flag + two CLI wiring
+lines, a small mutual-exclusion generalisation, README section, seven tests.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -401,3 +439,4 @@ wiring lines, README section, eight tests.
 | 8 | DMARC report-domain dangling vector ✅ | Low-Med | High (completes email-auth) | Yes (new vector + flag) |
 | 9 | Terminal output detail for MX/DKIM/DMARC ✅ | Low | High (default-mode correctness) | No |
 | 10 | SARIF 2.1.0 output for CI / Code Scanning ✅ | Low-Med | High (CI integration) | No (new flag only) |
+| 11 | CSV output for spreadsheet / ticket triage ✅ | Low | Med-High (analyst triage) | No (new flag only) |

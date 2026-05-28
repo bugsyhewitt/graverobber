@@ -60,6 +60,9 @@ graverobber -l subs.txt -c 50 --timeout 10 -o results.jsonl --json
 # SARIF output for GitHub Code Scanning / CI upload
 graverobber -l subs.txt --sarif -o graverobber.sarif
 
+# CSV output for spreadsheet / ticket triage
+graverobber -l subs.txt --csv -o takeovers.csv
+
 # Merge a private fingerprint list (local entries win)
 graverobber -l subs.txt --fingerprints ~/private.json
 
@@ -208,7 +211,8 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--timeout` | 10 | Per-target HTTP timeout (seconds) |
 | `-o, --output` | stdout | Write findings to a file |
 | `--json` | false | JSONL output (default: coloured terminal) |
-| `--sarif` | false | SARIF 2.1.0 output for GitHub Code Scanning / CI upload (mutually exclusive with `--json`) |
+| `--sarif` | false | SARIF 2.1.0 output for GitHub Code Scanning / CI upload (mutually exclusive with `--json`/`--csv`) |
+| `--csv` | false | CSV output (header + one row per finding) for spreadsheet/ticket triage (mutually exclusive with `--json`/`--sarif`) |
 | `--silent` | false | Results only, suppress progress/banner |
 | `--verbose` | false | Verbose debug logging to stderr |
 | `--no-ns` | false | Skip NS takeover checks |
@@ -366,8 +370,31 @@ Each finding becomes a SARIF `result`: `CONFIRMED` maps to `error`, `LIKELY` and
 namespaced under `graverobber/<vector>`; and a stable `partialFingerprint` keyed
 on `(subdomain, vector)` lets Code Scanning dedupe the same candidate across
 re-scans rather than re-opening an alert each run. `--sarif` is mutually
-exclusive with `--json`. A scan with zero findings still emits a valid (empty)
-log so the upload step never fails.
+exclusive with `--json` and `--csv`. A scan with zero findings still emits a
+valid (empty) log so the upload step never fails.
+
+### CSV for spreadsheet / ticket triage (`--csv`)
+
+`--csv` renders the scan as RFC 4180 CSV — a header row followed by one row per
+finding — for the spreadsheet-and-ticketing triage workflow that most teams
+actually run. The flat sheet drops straight into Excel/Google Sheets, a Jira CSV
+import, or a `csvkit`/`pandas` pipeline without a `jq` step.
+
+```sh
+subfinder -d example.com -silent | graverobber --csv -o takeovers.csv
+```
+
+```
+timestamp,subdomain,vector,confidence,service,target,scheme,fingerprint,evidence
+2026-05-28T12:00:00Z,dev.example.com,cname,CONFIRMED,AWS/S3,example.s3.amazonaws.com,https,The specified bucket does not exist,
+2026-05-28T12:00:00Z,reports.deleted-vendor.net,dmarc,POTENTIAL,,reports.deleted-vendor.net,,,DMARC rua/ruf report domain is NXDOMAIN
+```
+
+Every vector maps onto the same columns; the vector-specific dangling target
+(CNAME, SPF `include:`, NS/MX hosts, DKIM selector delegation, or DMARC report
+domain) is normalised into the single `target` column so the whole sheet sorts
+and filters uniformly. `--csv` is mutually exclusive with `--json` and
+`--sarif`. A scan with zero findings still emits a valid header-only file.
 
 ### Exit codes
 
