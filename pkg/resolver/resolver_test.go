@@ -264,6 +264,140 @@ func TestMX_EmptyOnNXDOMAIN(t *testing.T) {
 	}
 }
 
+// ---- RawCNAME method -------------------------------------------------------
+
+// TestRawCNAME_ReturnsAlias verifies RawCNAME extracts the immediate CNAME
+// target from a TypeCNAME response.
+func TestRawCNAME_ReturnsAlias(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+
+	const want = "s1.domainkey.u123.wl.sendgrid.net"
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			resp.Answer = []dns.RR{
+				&dns.CNAME{
+					Hdr: dns.RR_Header{
+						Name:   dns.Fqdn("s1._domainkey.example.com"),
+						Rrtype: dns.TypeCNAME,
+						Class:  dns.ClassINET,
+						Ttl:    300,
+					},
+					Target: dns.Fqdn(want),
+				},
+			}
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	r := New([]string{pc.LocalAddr().String()}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := r.RawCNAME(ctx, "s1._domainkey.example.com")
+	if err != nil {
+		t.Fatalf("RawCNAME: %v", err)
+	}
+	if got != want {
+		t.Errorf("RawCNAME = %q, want %q", got, want)
+	}
+}
+
+// TestRawCNAME_EmptyWhenNoCNAME verifies RawCNAME returns "" (no error) when the
+// host resolves but publishes no CNAME record (e.g. an inline TXT selector).
+func TestRawCNAME_EmptyWhenNoCNAME(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			// NOERROR with no CNAME answer (TXT-published selector).
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	r := New([]string{pc.LocalAddr().String()}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := r.RawCNAME(ctx, "default._domainkey.example.com")
+	if err != nil {
+		t.Fatalf("RawCNAME should not error on NOERROR/no-CNAME: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty CNAME, got %q", got)
+	}
+}
+
+// TestRawCNAME_NXDomain verifies RawCNAME returns ErrNXDomain when the host
+// itself does not exist.
+func TestRawCNAME_NXDomain(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			resp.Rcode = dns.RcodeNameError
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	r := New([]string{pc.LocalAddr().String()}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err = r.RawCNAME(ctx, "missing._domainkey.example.com")
+	if !errors.Is(err, ErrNXDomain) {
+		t.Errorf("expected ErrNXDomain, got %v", err)
+	}
+}
+
 // ---- #3: SOA retry constants ------------------------------------------------
 
 // TestSOARetryConstants documents and verifies the AuthoritativeSOA retry

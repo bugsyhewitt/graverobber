@@ -165,8 +165,10 @@ func TestRun_VectorsRunConcurrently(t *testing.T) {
 		t.Fatalf("load db: %v", err)
 	}
 	// Single worker, single target: any concurrency observed must come from the
-	// per-target vector fan-out, not from multiple workers or targets.
-	sc := New(db, Options{Concurrency: 1, Timeout: time.Second})
+	// per-target vector fan-out, not from multiple workers or targets. MX and
+	// DKIM are disabled so the timing measures only the three stubbed vectors
+	// (the real MX/DKIM detectors would otherwise hit DNS and skew the clock).
+	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true})
 
 	targets := make(chan string, 1)
 	targets <- "sub.example.com"
@@ -266,7 +268,8 @@ func TestRun_AllVectorFindingsAreEmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load db: %v", err)
 	}
-	sc := New(db, Options{Concurrency: 1, Timeout: time.Second})
+	// Disable MX/DKIM so the emitted set is exactly the three stubbed vectors.
+	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true})
 
 	targets := make(chan string, 1)
 	targets <- "sub.example.com"
@@ -332,6 +335,52 @@ func TestRun_NoMXDisablesMXVector(t *testing.T) {
 	}
 	if got := runWith(false); got != 1 {
 		t.Errorf("NoMX=false: mxVector called %d times, want 1", got)
+	}
+}
+
+// TestRun_NoDKIMDisablesDKIMVector verifies that when NoDKIM is set the
+// dkimVector function is not called, and that when NoDKIM is false it is called
+// once.
+func TestRun_NoDKIMDisablesDKIMVector(t *testing.T) {
+	origDKIM := dkimVector
+	t.Cleanup(func() { dkimVector = origDKIM })
+
+	var dkimCalls int32
+	dkimVector = func(_ context.Context, _ *Scanner, _ string) ([]finding.Finding, error) {
+		atomic.AddInt32(&dkimCalls, 1)
+		return nil, nil
+	}
+
+	db, err := fingerprints.Load([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("load db: %v", err)
+	}
+
+	runWith := func(noDKIM bool) int32 {
+		atomic.StoreInt32(&dkimCalls, 0)
+		sc := New(db, Options{
+			Concurrency: 1,
+			Timeout:     200 * time.Millisecond,
+			NoNS:        true,
+			NoSPF:       true,
+			NoMX:        true,
+			NoDKIM:      noDKIM,
+		})
+		targets := make(chan string, 1)
+		targets <- "sub.example.com"
+		close(targets)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		for range sc.Run(ctx, targets) {
+		}
+		return atomic.LoadInt32(&dkimCalls)
+	}
+
+	if got := runWith(true); got != 0 {
+		t.Errorf("NoDKIM=true: dkimVector called %d times, want 0", got)
+	}
+	if got := runWith(false); got != 1 {
+		t.Errorf("NoDKIM=false: dkimVector called %d times, want 1", got)
 	}
 }
 
