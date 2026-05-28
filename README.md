@@ -94,6 +94,52 @@ refreshing periodically keeps confidence accurate as providers change status.
 
 ---
 
+## Certificate Transparency monitoring (`ct`)
+
+The scanner finds dangling-record *candidates*. The `ct` subcommand closes the
+loop: it checks Certificate Transparency logs to see whether a certificate has
+**already been issued** for those subdomains. An unexpected certificate on a
+dangling subdomain is near-proof that a takeover already occurred — an attacker
+who claimed the resource provisioned TLS for it.
+
+```sh
+# Query crt.sh for all certs under target apexes (deduped to apex domains)
+subfinder -d target.com -silent | graverobber ct --json
+
+# Cross-reference a prior scan: certs whose name matches a flagged subdomain
+# get "takeover_candidate": true
+graverobber -l subs.txt --json -o findings.jsonl
+graverobber ct -l subs.txt --findings findings.jsonl
+
+# Only emit certificates flagged as takeover candidates
+graverobber ct -l subs.txt --findings findings.jsonl --candidates-only
+```
+
+`ct` reads targets from `-t`, `-l`, or stdin (same precedence as scan),
+deduplicates them to apex domains, and queries
+[`crt.sh`](https://crt.sh)'s public JSON endpoint (no auth). Output is JSONL,
+one certificate per line:
+
+```json
+{"name":"dev.example.com","apex":"example.com","not_before":"2026-05-01T08:00:00Z","issuer":"C=US, O=Let's Encrypt, CN=R3","takeover_candidate":true}
+```
+
+crt.sh is a shared community service backed by a single database; `ct`
+rate-limits to one query per second by default (`--rate-limit`). The exit code
+mirrors the scan command: `1` when any takeover-candidate certificate was found,
+`0` otherwise, `2` on error.
+
+| `ct` flag | Default | Description |
+|---|---|---|
+| `-t, --target` | — | Single target host |
+| `-l, --list` | — | File of targets, one host per line |
+| `--findings` | — | Prior graverobber JSONL findings to cross-reference (subdomains become candidates) |
+| `--candidates-only` | false | Emit only certificates flagged as takeover candidates |
+| `--rate-limit` | 1.0 | Max crt.sh queries/sec |
+| `--timeout` | 30 | Per-query HTTP timeout (seconds) |
+
+---
+
 ## Flags
 
 | Flag | Default | Description |

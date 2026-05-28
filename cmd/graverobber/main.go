@@ -126,6 +126,7 @@ func newRootCmd() *cobra.Command {
 	fl.StringVar(&f.githubToken, "github-token", "", "GitHub token for the --verify Pages probe (raises API rate limit)")
 
 	root.AddCommand(newUpdateCmd())
+	root.AddCommand(newCTCmd())
 	return root
 }
 
