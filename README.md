@@ -145,6 +145,54 @@ mirrors the scan command: `1` when any takeover-candidate certificate was found,
 
 ---
 
+## Second-order discovery (`links`)
+
+A *second-order* subdomain takeover hides one hop deeper than the scanner's
+direct targets. A live web app resolves and serves fine, but its HTML, JavaScript,
+or JSON references some other host — a forgotten analytics endpoint, a legacy CDN
+URL, an abandoned OAuth redirect host — that is itself dangling. The page is
+healthy; the vulnerable host is the one it points at.
+
+The `links` subcommand does the *discovery* half of that loop, and nothing more.
+For each live target it fetches the page, pulls every cross-origin host reference
+out of the body (excluding hosts on the same registrable apex, which the main
+scanner already covers), and emits them. Keeping extraction separate from scanning
+preserves graverobber's stdin→stdout pipeline ethos: the referenced hosts pipe
+straight back into `scan`.
+
+```sh
+# Discover the cross-origin hosts a set of live pages reference, then scan them
+graverobber links -l live-hosts.txt | graverobber scan --json
+
+# Single target, with source attribution
+graverobber links -t app.example.com --json
+```
+
+Default output is one host per line (pipe-friendly into `scan`). With `--json`,
+each line is a `{"host","source"}` record so you can see which page referenced
+each host:
+
+```json
+{"host":"cdn.thirdparty.net","source":"app.example.com"}
+```
+
+Referenced hosts are deduplicated across all targets, so a single dangling CDN
+referenced by ten pages emits once. The exit code mirrors `scan`/`ct`: `1` when
+any cross-origin reference was found, `0` otherwise, `2` on error. `links` reads
+targets from `-t`, `-l`, or stdin (same precedence as `scan`).
+
+| `links` flag | Default | Description |
+|---|---|---|
+| `-t, --target` | — | Single target host |
+| `-l, --list` | — | File of targets, one host per line |
+| `-c, --concurrency` | 20 | Concurrent page fetches |
+| `--timeout` | 15 | Per-page HTTP timeout (seconds) |
+| `--json` | false | Emit `{"host","source"}` JSONL (default: bare host per line) |
+| `--http-only` | false | Fetch pages over HTTP only |
+| `--https-only` | false | Fetch pages over HTTPS only |
+
+---
+
 ## Flags
 
 | Flag | Default | Description |

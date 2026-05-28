@@ -132,6 +132,7 @@ func newRootCmd() *cobra.Command {
 
 	root.AddCommand(newUpdateCmd())
 	root.AddCommand(newCTCmd())
+	root.AddCommand(newLinksCmd())
 	return root
 }
 
