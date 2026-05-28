@@ -761,3 +761,203 @@ func TestNSUnanimity_MatchProvider(t *testing.T) {
 		}
 	}
 }
+
+// ---- DMARC report-domain takeover vector -----------------------------------
+
+// TestDMARCFinding_VectorConstant pins the wire value of the DMARC vector.
+func TestDMARCFinding_VectorConstant(t *testing.T) {
+	if finding.VectorDMARC != "dmarc" {
+		t.Errorf("VectorDMARC: got %q, want dmarc", finding.VectorDMARC)
+	}
+}
+
+func TestExtractDMARC(t *testing.T) {
+	cases := []struct {
+		txts []string
+		want string
+	}{
+		{[]string{"v=DMARC1; p=reject; rua=mailto:r@x.net"}, "v=DMARC1; p=reject; rua=mailto:r@x.net"},
+		{[]string{"some-other", "v=DMARC1; p=none"}, "v=DMARC1; p=none"},
+		{[]string{"  v=DMARC1; p=quarantine  "}, "v=DMARC1; p=quarantine"},
+		{[]string{"v=spf1 include:a.com -all"}, ""},
+		{nil, ""},
+	}
+	for _, c := range cases {
+		if got := extractDMARC(c.txts); got != c.want {
+			t.Errorf("extractDMARC(%v) = %q, want %q", c.txts, got, c.want)
+		}
+	}
+}
+
+func TestDMARCReportDomains(t *testing.T) {
+	cases := []struct {
+		record string
+		want   []string
+	}{
+		{
+			"v=DMARC1; p=reject; rua=mailto:agg@reports.example.net",
+			[]string{"reports.example.net"},
+		},
+		{
+			"v=DMARC1; p=none; rua=mailto:a@x.net,mailto:b@y.net; ruf=mailto:f@z.net",
+			[]string{"x.net", "y.net", "z.net"},
+		},
+		{
+			// size-limit suffix and mixed case
+			"v=DMARC1; RUA=MAILTO:Agg@Reports.Example.NET!10m",
+			[]string{"reports.example.net"},
+		},
+		{
+			// no reporting tags
+			"v=DMARC1; p=reject; pct=100",
+			nil,
+		},
+		{
+			// malformed mailto (no @) is skipped
+			"v=DMARC1; rua=mailto:not-an-address",
+			nil,
+		},
+	}
+	for _, c := range cases {
+		got := dmarcReportDomains(c.record)
+		if len(got) != len(c.want) {
+			t.Fatalf("dmarcReportDomains(%q) = %v, want %v", c.record, got, c.want)
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("dmarcReportDomains(%q)[%d] = %q, want %q", c.record, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+// dmarcDNSServer spins up a local UDP DNS server modelling a DMARC record at
+// _dmarc.<target> whose TXT carries dmarcRecord. reportDomain is NXDOMAIN; every
+// other A query returns NOERROR with no answer (i.e. the domain exists).
+func dmarcDNSServer(t *testing.T, target, dmarcRecord, nxDomain string) (string, func()) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+
+			q := req.Question[0]
+			name := q.Name
+
+			switch {
+			case q.Qtype == dns.TypeTXT && name == dns.Fqdn("_dmarc."+target):
+				resp.Answer = []dns.RR{&dns.TXT{
+					Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 300},
+					Txt: []string{dmarcRecord},
+				}}
+			case q.Qtype == dns.TypeA && name == dns.Fqdn(nxDomain):
+				resp.Rcode = dns.RcodeNameError
+			case q.Qtype == dns.TypeCNAME && name == dns.Fqdn(nxDomain):
+				resp.Rcode = dns.RcodeNameError
+			default:
+				// Everything else NOERROR/no-answer → exists.
+			}
+
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	return pc.LocalAddr().String(), func() { pc.Close() }
+}
+
+// TestDMARC_DanglingReportDomainPotential drives the full detector: a DMARC
+// policy whose rua= domain is NXDOMAIN must yield exactly one Potential finding.
+func TestDMARC_DanglingReportDomainPotential(t *testing.T) {
+	const (
+		target       = "example.com"
+		reportDomain = "reports.deleted-vendor.invalid"
+	)
+	record := "v=DMARC1; p=reject; rua=mailto:agg@" + reportDomain
+
+	addr, cleanup := dmarcDNSServer(t, target, record, reportDomain)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Vector != finding.VectorDMARC {
+		t.Errorf("vector: got %q, want dmarc", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("confidence: got %q, want POTENTIAL", f.Confidence)
+	}
+	if f.DMARCURI != reportDomain {
+		t.Errorf("dmarc_uri: got %q, want %q", f.DMARCURI, reportDomain)
+	}
+	if f.Subdomain != reportDomain {
+		t.Errorf("subdomain: got %q, want %q", f.Subdomain, reportDomain)
+	}
+}
+
+// TestDMARC_LiveReportDomainNoFinding verifies that a report domain which
+// resolves (exists) produces no finding.
+func TestDMARC_LiveReportDomainNoFinding(t *testing.T) {
+	const target = "example.com"
+	// nxDomain is some unrelated name; the report domain "live.example.net"
+	// is not it, so the server returns NOERROR for it → exists → no finding.
+	record := "v=DMARC1; p=none; rua=mailto:a@live.example.net"
+
+	addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings for live report domain, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestDMARC_NoRecordNoFinding verifies that a target with no DMARC TXT record
+// produces no findings (and no error).
+func TestDMARC_NoRecordNoFinding(t *testing.T) {
+	// Server returns NOERROR/no-answer for the _dmarc TXT query.
+	addr, cleanup := dmarcDNSServer(t, "other.com", "v=DMARC1; p=none", "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, "example.com", r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings when no DMARC record, got %d", len(findings))
+	}
+}

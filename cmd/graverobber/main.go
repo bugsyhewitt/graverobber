@@ -74,6 +74,7 @@ type cliFlags struct {
 	noSPF        bool
 	noMX         bool
 	noDKIM       bool
+	noDMARC      bool
 	selectors    string
 	fingerprints []string
 	offline      bool
@@ -120,6 +121,7 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVar(&f.noSPF, "no-spf", false, "skip SPF include checks")
 	fl.BoolVar(&f.noMX, "no-mx", false, "skip MX dangling-record checks")
 	fl.BoolVar(&f.noDKIM, "no-dkim", false, "skip DKIM selector dangling-CNAME checks")
+	fl.BoolVar(&f.noDMARC, "no-dmarc", false, "skip DMARC report-domain dangling checks")
 	fl.StringVar(&f.selectors, "selectors", "", "comma-separated DKIM selectors to probe (default: common ESP selectors)")
 	fl.StringArrayVar(&f.fingerprints, "fingerprints", nil, "additional fingerprint JSON to merge (repeatable)")
 	fl.BoolVar(&f.offline, "offline", false, "use cached/embedded fingerprints only, no network")
@@ -211,6 +213,7 @@ func runScan(ctx context.Context, f *cliFlags) error {
 		NoSPF:         f.noSPF,
 		NoMX:          f.noMX,
 		NoDKIM:        f.noDKIM,
+		NoDMARC:       f.noDMARC,
 		HTTPOnly:      f.httpOnly,
 		HTTPSOnly:     f.httpsOnly,
 		Resolvers:     resolvers,

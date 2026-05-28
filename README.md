@@ -1,12 +1,12 @@
 # graverobber
 
-**Subdomain takeover scanner for CNAME, NS, SPF, MX, and DKIM dangling records.**
+**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records.**
 
-> Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, and
-> DKIM takeover detection in one pipeline-friendly Go binary.
+> Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, DKIM,
+> and DMARC takeover detection in one pipeline-friendly Go binary.
 
 `graverobber` is the only maintained Go binary that covers **CNAME**, **NS**,
-**SPF**, **MX**, and **DKIM** takeover vectors in a single tool. It is a static
+**SPF**, **MX**, **DKIM**, and **DMARC** takeover vectors in a single tool. It is a static
 binary with no runtime, reads targets from stdin/file/flag, streams JSONL, and
 uses the exit-code conventions of the `httpx`/`subfinder` family so it drops
 straight into a recon pipeline.
@@ -22,9 +22,11 @@ straight into a recon pipeline.
 | SPF   | An SPF `include:` directive points at an unregistered, claimable domain | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day |
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an ESP resource that is now NXDOMAIN | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024) |
+| DMARC | A `_dmarc` policy's `rua=`/`ruf=` report domain is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon |
 
-Most scanners cover CNAME only. NS, SPF, MX, and DKIM takeover are live,
-actively-exploited vectors that almost no Go tool handles.
+Most scanners cover CNAME only. NS, SPF, MX, DKIM, and DMARC takeover are live,
+actively-exploited vectors that almost no Go tool handles. Together SPF, DKIM,
+MX, and DMARC cover the complete email-authentication takeover surface.
 
 ---
 
@@ -62,7 +64,7 @@ graverobber -l subs.txt --fingerprints ~/private.json
 graverobber -l subs.txt --offline
 
 # Skip vectors
-graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim
+graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc
 
 # Probe a custom set of DKIM selectors instead of the built-in ESP defaults
 graverobber -l subs.txt --selectors default,google,s1,s2,k1
@@ -209,6 +211,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-spf` | false | Skip SPF include checks |
 | `--no-mx` | false | Skip MX dangling-record checks |
 | `--no-dkim` | false | Skip DKIM selector dangling-CNAME checks |
+| `--no-dmarc` | false | Skip DMARC report-domain dangling checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
 | `--offline` | false | Cached/embedded fingerprints only, no network |
@@ -258,6 +261,29 @@ selector, graverobber resolves the `_domainkey` CNAME; if its target is
 `NXDOMAIN` it emits a `CONFIRMED` `dkim` finding. Selectors published as inline
 TXT keys (not delegated) are never flagged.
 
+### DMARC report-domain takeover (`--no-dmarc`)
+
+A DMARC policy at `_dmarc.<domain>` can publish two reporting addresses:
+
+```
+rua=mailto:aggregate@reports.example.net   (aggregate reports)
+ruf=mailto:forensic@reports.example.net    (failure/forensic reports)
+```
+
+Each `mailto:` URI names a domain that receives mail on the policy owner's
+behalf. If that domain is `NXDOMAIN` — the reporting vendor was decommissioned,
+or the address points at a forgotten internal subdomain whose zone was deleted —
+an attacker who registers or reclaims it **intercepts every DMARC report sent
+for the target**. The reports expose the target's full sending infrastructure,
+which spoofing attempts pass or fail alignment, and source IP reputation: a
+quiet reconnaissance goldmine, and the fourth leg of the email-authentication
+takeover surface alongside SPF, DKIM, and MX.
+
+graverobber resolves `_dmarc.<target>`, parses the `rua=`/`ruf=` tags (handling
+comma-separated lists, mixed case, and `!size` limits), and probes each report
+domain. A domain that is `NXDOMAIN` yields a `POTENTIAL` `dmarc` finding — a
+DNS-only signal with no fingerprint, classified like the SPF `include:` vector.
+
 ---
 
 ## Confidence model
@@ -278,6 +304,7 @@ JSONL — one finding per line:
 
 ```json
 {"subdomain":"dev.example.com","vector":"cname","service":"AWS/S3","confidence":"CONFIRMED","cname":"example.s3.amazonaws.com","fingerprint":"The specified bucket does not exist","scheme":"https","timestamp":"2026-05-16T12:34:56Z"}
+{"subdomain":"reports.deleted-vendor.net","vector":"dmarc","confidence":"POTENTIAL","dmarc_uri":"reports.deleted-vendor.net","evidence":"DMARC rua/ruf report domain is NXDOMAIN (claimable — report interception)","timestamp":"2026-05-28T12:00:00Z"}
 ```
 
 ### Exit codes

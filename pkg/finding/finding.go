@@ -29,6 +29,10 @@ const (
 	// as a CNAME whose target is NXDOMAIN — the ESP resource is gone and an
 	// attacker who reclaims it can serve a DKIM key that signs spoofed mail.
 	VectorDKIM Vector = "dkim"
+	// VectorDMARC: a DMARC policy at _dmarc.<domain> carries a rua=/ruf= report
+	// URI whose domain is NXDOMAIN — an attacker who claims it intercepts every
+	// DMARC aggregate/forensic report sent for the target.
+	VectorDMARC Vector = "dmarc"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.
@@ -69,6 +73,9 @@ type Finding struct {
 	// DKIMSelector is set for VectorDKIM findings: the selector whose
 	// _domainkey CNAME is dangling (e.g. "s1" for s1._domainkey.example.com).
 	DKIMSelector string `json:"dkim_selector,omitempty"`
+	// DMARCURI is set for VectorDMARC findings: the claimable rua/ruf report
+	// domain (the part after "mailto:...@").
+	DMARCURI string `json:"dmarc_uri,omitempty"`
 
 	// Scheme records which scheme produced an HTTP-based match: "https" or
 	// "http" (see handoff open question #4).
