@@ -70,6 +70,7 @@ type cliFlags struct {
 	output        string
 	json          bool
 	sarif         bool
+	csv           bool
 	silent        bool
 	verbose       bool
 	noNS          bool
@@ -119,6 +120,7 @@ func newRootCmd() *cobra.Command {
 	fl.StringVarP(&f.output, "output", "o", "", "write findings to file (default stdout)")
 	fl.BoolVar(&f.json, "json", false, "JSONL output (default: coloured terminal)")
 	fl.BoolVar(&f.sarif, "sarif", false, "SARIF 2.1.0 output for GitHub Code Scanning / CI upload")
+	fl.BoolVar(&f.csv, "csv", false, "CSV output (header + one row per finding) for spreadsheet/ticket triage")
 	fl.BoolVar(&f.silent, "silent", false, "results only, suppress progress/banner")
 	fl.BoolVar(&f.verbose, "verbose", false, "verbose debug logging to stderr")
 	fl.BoolVar(&f.noNS, "no-ns", false, "skip NS takeover checks")
@@ -199,8 +201,8 @@ func runScan(ctx context.Context, f *cliFlags) error {
 	if f.httpOnly && f.httpsOnly {
 		return errors.New("--http-only and --https-only are mutually exclusive")
 	}
-	if f.json && f.sarif {
-		return errors.New("--json and --sarif are mutually exclusive output formats")
+	if n := boolCount(f.json, f.sarif, f.csv); n > 1 {
+		return errors.New("--json, --sarif, and --csv are mutually exclusive output formats")
 	}
 
 	minConf, ok := finding.ParseConfidence(strings.ToLower(strings.TrimSpace(f.minConfidence)))
@@ -268,7 +270,7 @@ func runScan(ctx context.Context, f *cliFlags) error {
 	if err := <-scanErr; err != nil {
 		return err
 	}
-	if !f.silent && !f.json && !f.sarif {
+	if !f.silent && !f.json && !f.sarif && !f.csv {
 		fmt.Fprintf(os.Stderr, "graverobber: %d finding(s)\n", count)
 	}
 	if count > 0 {
@@ -354,6 +356,9 @@ func openWriter(f *cliFlags) (output.Writer, func(), error) {
 	if f.sarif {
 		return output.NewSARIF(sink, version), cleanup, nil
 	}
+	if f.csv {
+		return output.NewCSV(sink), cleanup, nil
+	}
 	if f.json {
 		return output.NewJSONL(sink), cleanup, nil
 	}
@@ -438,6 +443,18 @@ func parseSelectors(s string) []string {
 		}
 	}
 	return out
+}
+
+// boolCount returns how many of the given flags are true. It backs the mutual-
+// exclusion guard for the machine output formats (--json/--sarif/--csv).
+func boolCount(bs ...bool) int {
+	n := 0
+	for _, b := range bs {
+		if b {
+			n++
+		}
+	}
+	return n
 }
 
 // normalizeLine trims whitespace and drops blank lines and # comments. It
