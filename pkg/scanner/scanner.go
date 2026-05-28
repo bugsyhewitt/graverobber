@@ -35,6 +35,12 @@ type Options struct {
 	HTTPSOnly     bool          // probe services over HTTPS only
 	Resolvers     []string      // custom recursive DNS resolvers
 	DKIMSelectors []string      // override the default DKIM selector probe list
+
+	// MinConfidence, when set, suppresses any finding weaker than this tier:
+	// CONFIRMED ≥ LIKELY ≥ POTENTIAL. The empty value (the default) emits every
+	// finding. The threshold is applied after active verification, so a
+	// --verify upgrade can lift a finding past the filter.
+	MinConfidence finding.Confidence
 }
 
 // DefaultOptions returns the handoff-specified defaults.
@@ -214,6 +220,13 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.M
 		}
 		if conf, err := s.verifier.Verify(ctx, f); err == nil {
 			f.Confidence = conf
+		}
+		// Apply the confidence threshold after verification so a --verify
+		// upgrade (LIKELY→CONFIRMED) can lift a finding past the filter. The
+		// dedup key is still stored above so a suppressed finding is not
+		// re-evaluated on a duplicate target.
+		if !f.Confidence.AtLeast(s.opts.MinConfidence) {
+			continue
 		}
 		select {
 		case <-ctx.Done():
