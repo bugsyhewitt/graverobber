@@ -76,7 +76,12 @@ flag additions.
 
 ---
 
-## Rank 3 — MX record dangling-record detection (fourth vector)
+## Rank 3 — MX record dangling-record detection (fourth vector) — ✅ IMPLEMENTED
+
+**Status:** Shipped (commit b281002). `detectors.MX` adds `VectorMX` ("mx") with
+`MXHosts` on `Finding` and the `--no-mx` flag; NXDOMAIN MX hosts are `CONFIRMED`,
+known-cloud-provider hosts are `POTENTIAL`.
+
 
 **What:** Add `VectorMX` as a fourth detection vector. A dangling MX record (MX
 pointing to a hostname that is NXDOMAIN or belongs to a cloud provider whose
@@ -111,7 +116,12 @@ code plus tests.
 
 ---
 
-## Rank 4 — NS provider list sync from indianajson/can-i-take-over-dns
+## Rank 4 — NS provider list sync from indianajson/can-i-take-over-dns — ✅ IMPLEMENTED
+
+**Status:** Shipped (commit 445bebe, PR #2). `pkg/nsproviders` fetches and caches
+the indianajson provider list behind `graverobber update --ns-providers`, falling
+back to the compiled-in defaults when no cache is present.
+
 
 **What:** `ns.go` hardcodes `knownDNSProviders` (20 suffixes). The canonical
 upstream source is `github.com/indianajson/can-i-take-over-dns`, which documents
@@ -139,7 +149,12 @@ Markdown parsing as the fallback implementation.
 
 ---
 
-## Rank 5 — Certificate Transparency (CT) log monitoring integration
+## Rank 5 — Certificate Transparency (CT) log monitoring integration — ✅ IMPLEMENTED
+
+**Status:** Shipped (commit 2e57d54, PR #3). `pkg/ct` + `cmd/graverobber/ct.go`
+add the `graverobber ct` subcommand querying crt.sh and streaming certificate
+JSONL with a takeover-candidate cross-reference.
+
 
 **What:** Add a `graverobber ct` subcommand that queries `crt.sh` for recent
 certificate issuances on target domains and flags any certificate issued for a
@@ -214,7 +229,12 @@ value is catching the lazy case (common selectors), not the complete case.
 
 ---
 
-## Rank 7 — Second-order subdomain takeover: JS reference scanning
+## Rank 7 — Second-order subdomain takeover: JS reference scanning — ✅ IMPLEMENTED
+
+**Status:** Shipped (commit da9a6c8, PR #5). `pkg/links` + `cmd/graverobber/links.go`
+add the `graverobber links` subcommand that crawls live pages and extracts
+cross-origin domain references for second-order takeover discovery.
+
 
 **What:** Second-order subdomain takeover (documented by Patrik Hudak, implemented
 in the `second-order` Go tool) occurs when a live web application references a
@@ -235,6 +255,44 @@ output into graverobber) than a native feature.
 
 **Complexity:** High — crawler integration significantly increases dependency
 surface and test complexity.
+
+---
+
+## Rank 8 — DMARC report-domain dangling detection (sixth vector) — ✅ IMPLEMENTED
+
+**Status:** Shipped (Phase 2, Rotation 9). Added after Ranks 1–7 were all
+complete; this is the natural completion of the email-authentication takeover
+surface (SPF include:, DKIM selector CNAME, MX host, and now DMARC report URI).
+
+`detectors.DMARC` adds `VectorDMARC` ("dmarc"). It resolves the TXT record at
+`_dmarc.<target>`, extracts the policy (`v=DMARC1` prefix), parses the `rua=` and
+`ruf=` reporting tags — handling comma-separated URI lists, mixed case, and the
+optional `!<size>` report-size limit — and pulls the domain from each
+`mailto:user@domain` URI. Each report domain is probed with `CNAMEChain`; an
+`ErrNXDomain` target yields a `POTENTIAL` `VectorDMARC` finding carrying the
+claimable domain in the new `DMARCURI` (`dmarc_uri`) field. POTENTIAL (not
+CONFIRMED) mirrors the SPF `include:` classification: a DNS-only NXDOMAIN signal
+with no fingerprint match.
+
+Wired into the scanner fan-out behind `Options.NoDMARC` / `--no-dmarc` (opt-out,
+on by default). Guarded by `TestDMARC_DanglingReportDomainPotential`,
+`TestDMARC_LiveReportDomainNoFinding`, `TestDMARC_NoRecordNoFinding`,
+`TestExtractDMARC`, `TestDMARCReportDomains`, `TestDMARCFinding_VectorConstant`
+(detectors) and `TestRun_NoDMARCDisablesDMARCVector` (scanner).
+
+**Why this vector:** A dangling DMARC `rua`/`ruf` domain lets an attacker who
+claims it intercept every DMARC aggregate/forensic report sent for the target —
+exposing the target's complete sending infrastructure, which spoofing attempts
+pass or fail alignment, and source-IP reputation. It is a quiet reconnaissance
+channel documented alongside the SPF/MX vectors in the SubdoMailing and Hazy Hawk
+campaigns, and it is the only remaining email-auth record class graverobber did
+not yet cover. DNS-only, no API keys, no new dependencies — fully on-ethos.
+
+**Schema:** `finding.VectorDMARC = "dmarc"`; new `DMARCURI` field
+(`json:"dmarc_uri,omitempty"`). `--no-dmarc` CLI flag.
+
+**Complexity:** Low-medium — one new detector file mirroring SPF, two schema
+additions, scanner option + CLI flag, seven new tests.
 
 ---
 
@@ -260,8 +318,9 @@ surface and test complexity.
 |------|------|--------|--------|-------------|
 | 1 | Parallel vector execution per target ✅ | Low | High (throughput) | No |
 | 2 | Active verifier: S3, GitHub Pages, Azure | Medium | High (accuracy) | No (SetVerifier seam ready) |
-| 3 | MX record fourth vector | Medium | High (new coverage) | Yes (new vector + flag) |
-| 4 | NS provider list sync from indianajson | Low-Med | Medium (accuracy) | No |
-| 5 | CT log monitoring subcommand | Medium | High (unique feature) | No (new subcommand) |
+| 3 | MX record fourth vector ✅ | Medium | High (new coverage) | Yes (new vector + flag) |
+| 4 | NS provider list sync from indianajson ✅ | Low-Med | Medium (accuracy) | No |
+| 5 | CT log monitoring subcommand ✅ | Medium | High (unique feature) | No (new subcommand) |
 | 6 | DKIM selector dangling CNAME ✅ | Medium | Medium (new coverage) | Yes (new vector + flag) |
-| 7 | Second-order JS reference scanning | High | Medium (niche) | Yes (new mode) |
+| 7 | Second-order JS reference scanning ✅ | High | Medium (niche) | Yes (new mode) |
+| 8 | DMARC report-domain dangling vector ✅ | Low-Med | High (completes email-auth) | Yes (new vector + flag) |

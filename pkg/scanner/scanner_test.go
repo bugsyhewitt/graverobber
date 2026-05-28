@@ -165,10 +165,10 @@ func TestRun_VectorsRunConcurrently(t *testing.T) {
 		t.Fatalf("load db: %v", err)
 	}
 	// Single worker, single target: any concurrency observed must come from the
-	// per-target vector fan-out, not from multiple workers or targets. MX and
-	// DKIM are disabled so the timing measures only the three stubbed vectors
-	// (the real MX/DKIM detectors would otherwise hit DNS and skew the clock).
-	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true})
+	// per-target vector fan-out, not from multiple workers or targets. MX,
+	// DKIM, and DMARC are disabled so the timing measures only the three stubbed
+	// vectors (the real detectors would otherwise hit DNS and skew the clock).
+	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true, NoDMARC: true})
 
 	targets := make(chan string, 1)
 	targets <- "sub.example.com"
@@ -268,8 +268,8 @@ func TestRun_AllVectorFindingsAreEmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load db: %v", err)
 	}
-	// Disable MX/DKIM so the emitted set is exactly the three stubbed vectors.
-	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true})
+	// Disable MX/DKIM/DMARC so the emitted set is exactly the three stubbed vectors.
+	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true, NoDMARC: true})
 
 	targets := make(chan string, 1)
 	targets <- "sub.example.com"
@@ -381,6 +381,53 @@ func TestRun_NoDKIMDisablesDKIMVector(t *testing.T) {
 	}
 	if got := runWith(false); got != 1 {
 		t.Errorf("NoDKIM=false: dkimVector called %d times, want 1", got)
+	}
+}
+
+// TestRun_NoDMARCDisablesDMARCVector verifies that when NoDMARC is set the
+// dmarcVector function is not called, and that when NoDMARC is false it is
+// called once.
+func TestRun_NoDMARCDisablesDMARCVector(t *testing.T) {
+	origDMARC := dmarcVector
+	t.Cleanup(func() { dmarcVector = origDMARC })
+
+	var dmarcCalls int32
+	dmarcVector = func(_ context.Context, _ *Scanner, _ string) ([]finding.Finding, error) {
+		atomic.AddInt32(&dmarcCalls, 1)
+		return nil, nil
+	}
+
+	db, err := fingerprints.Load([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("load db: %v", err)
+	}
+
+	runWith := func(noDMARC bool) int32 {
+		atomic.StoreInt32(&dmarcCalls, 0)
+		sc := New(db, Options{
+			Concurrency: 1,
+			Timeout:     200 * time.Millisecond,
+			NoNS:        true,
+			NoSPF:       true,
+			NoMX:        true,
+			NoDKIM:      true,
+			NoDMARC:     noDMARC,
+		})
+		targets := make(chan string, 1)
+		targets <- "sub.example.com"
+		close(targets)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		for range sc.Run(ctx, targets) {
+		}
+		return atomic.LoadInt32(&dmarcCalls)
+	}
+
+	if got := runWith(true); got != 0 {
+		t.Errorf("NoDMARC=true: dmarcVector called %d times, want 0", got)
+	}
+	if got := runWith(false); got != 1 {
+		t.Errorf("NoDMARC=false: dmarcVector called %d times, want 1", got)
 	}
 }
 

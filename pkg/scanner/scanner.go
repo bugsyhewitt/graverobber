@@ -30,6 +30,7 @@ type Options struct {
 	NoSPF         bool          // skip the SPF include vector
 	NoMX          bool          // skip the MX takeover vector
 	NoDKIM        bool          // skip the DKIM selector vector
+	NoDMARC       bool          // skip the DMARC report-domain vector
 	HTTPOnly      bool          // probe services over HTTP only
 	HTTPSOnly     bool          // probe services over HTTPS only
 	Resolvers     []string      // custom recursive DNS resolvers
@@ -148,15 +149,19 @@ var (
 	dkimVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
 		return detectors.DKIM(ctx, target, s.resolver, s.opts.DKIMSelectors)
 	}
+	dmarcVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.DMARC(ctx, target, s.resolver)
+	}
 )
 
 // scanTarget runs the per-target detection pipeline and emits any findings.
 //
-// CNAME always runs. NS and SPF run unless disabled. The three vectors are
-// independent and I/O-bound (CNAME probes HTTP, NS probes authoritative
-// nameservers with UDP retries, SPF recurses TXT records), so scanTarget fans
-// them out across one goroutine each and joins on a WaitGroup. Per-target wall
-// time is therefore roughly max(CNAME, NS, SPF) rather than their sum.
+// CNAME always runs. NS, SPF, MX, DKIM, and DMARC run unless disabled. The
+// vectors are independent and I/O-bound (CNAME probes HTTP, NS probes
+// authoritative nameservers with UDP retries, SPF/MX/DKIM/DMARC recurse DNS
+// records), so scanTarget fans them out across one goroutine each and joins on a
+// WaitGroup. Per-target wall time is therefore roughly the slowest single vector
+// rather than their sum.
 //
 // Only the collection of findings is parallelised; deduplication
 // (the emitted sync.Map) and emission are performed serially afterwards exactly
@@ -175,6 +180,9 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.M
 	}
 	if !s.opts.NoDKIM {
 		vectors = append(vectors, dkimVector)
+	}
+	if !s.opts.NoDMARC {
+		vectors = append(vectors, dmarcVector)
 	}
 
 	// Fan out: run each enabled vector concurrently, collecting findings into a
