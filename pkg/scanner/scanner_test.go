@@ -431,6 +431,81 @@ func TestRun_NoDMARCDisablesDMARCVector(t *testing.T) {
 	}
 }
 
+// ---- --min-confidence filter ----------------------------------------------
+
+// TestRun_MinConfidenceFiltersWeakerFindings stubs the CNAME vector to emit one
+// finding of each confidence tier and verifies that Options.MinConfidence
+// suppresses everything weaker than the threshold while the empty default emits
+// all three.
+func TestRun_MinConfidenceFiltersWeakerFindings(t *testing.T) {
+	origCNAME := cnameVector
+	t.Cleanup(func() { cnameVector = origCNAME })
+
+	// One finding per tier, distinguished by Service so the dedup key is unique.
+	cnameVector = func(_ context.Context, _ *Scanner, target string) ([]finding.Finding, error) {
+		return []finding.Finding{
+			{Subdomain: target, Vector: finding.VectorCNAME, Service: "conf", Confidence: finding.Confirmed},
+			{Subdomain: target, Vector: finding.VectorCNAME, Service: "likely", Confidence: finding.Likely},
+			{Subdomain: target, Vector: finding.VectorCNAME, Service: "pot", Confidence: finding.Potential},
+		}, nil
+	}
+
+	db, err := fingerprints.Load([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("load db: %v", err)
+	}
+
+	run := func(min finding.Confidence) map[finding.Confidence]int {
+		sc := New(db, Options{
+			Concurrency:   1,
+			Timeout:       time.Second,
+			NoNS:          true,
+			NoSPF:         true,
+			NoMX:          true,
+			NoDKIM:        true,
+			NoDMARC:       true,
+			MinConfidence: min,
+		})
+		targets := make(chan string, 1)
+		targets <- "sub.example.com"
+		close(targets)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		got := map[finding.Confidence]int{}
+		for f := range sc.Run(ctx, targets) {
+			got[f.Confidence]++
+		}
+		return got
+	}
+
+	cases := []struct {
+		min       finding.Confidence
+		wantTotal int
+		wantTiers []finding.Confidence
+		desc      string
+	}{
+		{"", 3, []finding.Confidence{finding.Confirmed, finding.Likely, finding.Potential}, "no threshold emits all three"},
+		{finding.Potential, 3, []finding.Confidence{finding.Confirmed, finding.Likely, finding.Potential}, "potential threshold emits all three"},
+		{finding.Likely, 2, []finding.Confidence{finding.Confirmed, finding.Likely}, "likely threshold drops potential"},
+		{finding.Confirmed, 1, []finding.Confidence{finding.Confirmed}, "confirmed threshold keeps only confirmed"},
+	}
+	for _, tc := range cases {
+		got := run(tc.min)
+		total := 0
+		for _, n := range got {
+			total += n
+		}
+		if total != tc.wantTotal {
+			t.Errorf("%s: emitted %d findings, want %d (%v)", tc.desc, total, tc.wantTotal, got)
+		}
+		for _, tier := range tc.wantTiers {
+			if got[tier] != 1 {
+				t.Errorf("%s: tier %q count = %d, want 1", tc.desc, tier, got[tier])
+			}
+		}
+	}
+}
+
 // ---- #2: dedup sync.Map is Run-scoped, not Scanner-scoped ------------------
 
 // TestScanner_EmittedMapIsRunLocal verifies by struct inspection that Scanner

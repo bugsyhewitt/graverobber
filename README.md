@@ -221,6 +221,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--https-only` | false | Probe services over HTTPS only |
 | `--verify` | false | Actively verify S3 / GitHub Pages / Azure findings (upgrades `LIKELY` → `CONFIRMED`) |
 | `--github-token` | — | GitHub token for the `--verify` Pages probe (raises the API rate limit) |
+| `--min-confidence` | — | Suppress findings below a tier: `confirmed` \| `likely` \| `potential` (default: emit all) |
 
 When neither `--http-only` nor `--https-only` is set, `graverobber` probes
 HTTPS first and falls back to HTTP.
@@ -242,6 +243,24 @@ can upgrade a `LIKELY` finding to `CONFIRMED`:
 All probes are read-only — `graverobber` confirms claimability, it never claims the
 resource. Verification only ever upgrades confidence; it never downgrades, and it never
 touches a finding the fingerprint stage already marked `CONFIRMED`.
+
+### Filtering by confidence (`--min-confidence`)
+
+Mass scans surface a long tail of `POTENTIAL` findings — dangling records pointing at
+unknown services that may or may not be claimable. `--min-confidence` suppresses
+everything below a tier so triage starts with the high-signal hits:
+
+```sh
+# Only act-now findings:
+cat hosts.txt | graverobber --min-confidence confirmed --json
+
+# Skip the DNS-only noise, keep fingerprint matches and better:
+cat hosts.txt | graverobber --min-confidence likely
+```
+
+The tiers are ordered `CONFIRMED` ≥ `LIKELY` ≥ `POTENTIAL`. The filter is applied
+*after* `--verify`, so a probe that upgrades a `LIKELY` finding to `CONFIRMED` keeps it
+above a `confirmed` threshold. The default (flag omitted) emits every finding.
 
 ### DKIM selector takeover (`--no-dkim`, `--selectors`)
 

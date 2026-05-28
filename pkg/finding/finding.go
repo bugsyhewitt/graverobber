@@ -50,6 +50,50 @@ const (
 	Potential Confidence = "POTENTIAL"
 )
 
+// rank orders the three confidence tiers from weakest to strongest so they can
+// be compared with AtLeast. An unrecognised value ranks 0 (below Potential),
+// which keeps a malformed confidence from ever satisfying a threshold.
+func (c Confidence) rank() int {
+	switch c {
+	case Potential:
+		return 1
+	case Likely:
+		return 2
+	case Confirmed:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// AtLeast reports whether c is at least as certain as min. It is the predicate
+// behind the scanner's --min-confidence filter: Confirmed ≥ Likely ≥ Potential.
+// An empty min is treated as "no threshold" and always passes.
+func (c Confidence) AtLeast(min Confidence) bool {
+	if min == "" {
+		return true
+	}
+	return c.rank() >= min.rank()
+}
+
+// ParseConfidence maps a case-insensitive tier name ("confirmed", "likely",
+// "potential") to its Confidence value. An empty string yields ("", true),
+// meaning "no threshold". An unrecognised name yields ("", false).
+func ParseConfidence(s string) (Confidence, bool) {
+	switch s {
+	case "":
+		return "", true
+	case "confirmed", "CONFIRMED", "Confirmed":
+		return Confirmed, true
+	case "likely", "LIKELY", "Likely":
+		return Likely, true
+	case "potential", "POTENTIAL", "Potential":
+		return Potential, true
+	default:
+		return "", false
+	}
+}
+
 // Finding is a single takeover candidate emitted by the scanner. It is the unit
 // of JSONL output; see pkg/output for serialization. JSON field names match the
 // handoff "Output" specification; vector-specific fields use omitempty so a

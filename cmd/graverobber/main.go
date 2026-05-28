@@ -24,6 +24,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bugsyhewitt/graverobber/pkg/finding"
 	"github.com/bugsyhewitt/graverobber/pkg/fingerprints"
 	"github.com/bugsyhewitt/graverobber/pkg/nsproviders"
 	"github.com/bugsyhewitt/graverobber/pkg/output"
@@ -62,28 +63,29 @@ func run() error {
 
 // cliFlags holds the parsed flag values for the root scan command.
 type cliFlags struct {
-	target       string
-	list         string
-	concurrency  int
-	timeout      int
-	output       string
-	json         bool
-	silent       bool
-	verbose      bool
-	noNS         bool
-	noSPF        bool
-	noMX         bool
-	noDKIM       bool
-	noDMARC      bool
-	selectors    string
-	fingerprints []string
-	offline      bool
-	resolvers    string
-	rateLimit    int
-	httpOnly     bool
-	httpsOnly    bool
-	verify       bool
-	githubToken  string
+	target        string
+	list          string
+	concurrency   int
+	timeout       int
+	output        string
+	json          bool
+	silent        bool
+	verbose       bool
+	noNS          bool
+	noSPF         bool
+	noMX          bool
+	noDKIM        bool
+	noDMARC       bool
+	selectors     string
+	fingerprints  []string
+	offline       bool
+	resolvers     string
+	rateLimit     int
+	httpOnly      bool
+	httpsOnly     bool
+	verify        bool
+	githubToken   string
+	minConfidence string
 }
 
 func newRootCmd() *cobra.Command {
@@ -131,6 +133,7 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVar(&f.httpsOnly, "https-only", false, "probe services over HTTPS only")
 	fl.BoolVar(&f.verify, "verify", false, "actively verify S3/GitHub Pages/Azure findings (upgrades LIKELY→CONFIRMED)")
 	fl.StringVar(&f.githubToken, "github-token", "", "GitHub token for the --verify Pages probe (raises API rate limit)")
+	fl.StringVar(&f.minConfidence, "min-confidence", "", "suppress findings below this tier: confirmed|likely|potential (default: emit all)")
 
 	root.AddCommand(newUpdateCmd())
 	root.AddCommand(newCTCmd())
@@ -195,6 +198,11 @@ func runScan(ctx context.Context, f *cliFlags) error {
 		return errors.New("--http-only and --https-only are mutually exclusive")
 	}
 
+	minConf, ok := finding.ParseConfidence(strings.ToLower(strings.TrimSpace(f.minConfidence)))
+	if !ok {
+		return fmt.Errorf("invalid --min-confidence %q: want confirmed, likely, or potential", f.minConfidence)
+	}
+
 	db, err := loadDB(ctx, f)
 	if err != nil {
 		return err
@@ -218,6 +226,7 @@ func runScan(ctx context.Context, f *cliFlags) error {
 		HTTPSOnly:     f.httpsOnly,
 		Resolvers:     resolvers,
 		DKIMSelectors: parseSelectors(f.selectors),
+		MinConfidence: minConf,
 	}
 
 	w, closeOut, err := openWriter(f)
