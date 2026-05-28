@@ -12,6 +12,7 @@ import (
 
 	"github.com/bugsyhewitt/graverobber/pkg/finding"
 	"github.com/bugsyhewitt/graverobber/pkg/fingerprints"
+	"github.com/bugsyhewitt/graverobber/pkg/nsproviders"
 	"github.com/bugsyhewitt/graverobber/pkg/resolver"
 )
 
@@ -531,6 +532,26 @@ func TestMXFinding_MXHostsField(t *testing.T) {
 	}
 	if f.Vector != finding.VectorMX {
 		t.Errorf("expected VectorMX, got %q", f.Vector)
+	}
+}
+
+// TestSetProviders_OverridesActiveList verifies that SetProviders swaps the
+// list the NS detector matches against, and that resetting to nil restores the
+// cache-or-default behaviour.
+func TestSetProviders_OverridesActiveList(t *testing.T) {
+	defer SetProviders(nil) // restore default for other tests
+
+	custom, err := nsproviders.Load([]byte(`[{"suffix":"only-this.test","label":"Custom","vulnerable":true}]`))
+	if err != nil {
+		t.Fatalf("nsproviders.Load: %v", err)
+	}
+	SetProviders(custom)
+
+	if activeProviders().Match("ns1.only-this.test") == "" {
+		t.Error("SetProviders override not applied: custom suffix did not match")
+	}
+	if activeProviders().Match("ns1.linode.com") != "" {
+		t.Error("SetProviders override should have replaced the default list")
 	}
 }
 

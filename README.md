@@ -63,10 +63,14 @@ graverobber -l subs.txt --offline
 graverobber -l subs.txt --no-ns --no-spf
 ```
 
-### Refreshing the fingerprint database
+### Refreshing the databases
 
 ```sh
+# Refresh the CNAME fingerprint database
 graverobber update
+
+# Refresh the NS takeover provider list
+graverobber update --ns-providers
 ```
 
 `update` fetches the CI-verified `fingerprints.json` from
@@ -74,6 +78,19 @@ graverobber update
 validates it, atomically writes the cache at
 `~/.config/graverobber/fingerprints.json`, and prints an added/removed/changed
 diff. The cache is canonical; a compiled-in snapshot is the offline fallback.
+
+`update --ns-providers` does the same for the **NS takeover provider list**: it
+fetches the README of
+[indianajson/can-i-take-over-dns](https://github.com/indianajson/can-i-take-over-dns)
+— the only community-vetted source for which DNS providers allow a deleted
+hosted zone to be re-created — parses its provider table, and writes the cache
+at `~/.config/graverobber/ns_providers.json`. The NS detector uses this list to
+decide between a `CONFIRMED` finding (deleted zone at a re-claimable provider)
+and a `POTENTIAL` one. Only providers the upstream marks **Vulnerable** are
+treated as confirmable; **Edge Case**, **Not Vulnerable**, and **Registration
+Closed** providers are not. A compiled-in snapshot is the offline fallback when
+no cache is present, so a stale list never silently disables NS scoring — but
+refreshing periodically keeps confidence accurate as providers change status.
 
 ---
 

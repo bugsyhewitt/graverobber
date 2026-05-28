@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/bugsyhewitt/graverobber/pkg/fingerprints"
+	"github.com/bugsyhewitt/graverobber/pkg/nsproviders"
 	"github.com/bugsyhewitt/graverobber/pkg/output"
 	"github.com/bugsyhewitt/graverobber/pkg/scanner"
 	"github.com/bugsyhewitt/graverobber/pkg/verifier"
@@ -129,15 +130,26 @@ func newRootCmd() *cobra.Command {
 }
 
 // newUpdateCmd builds the `graverobber update` subcommand: an explicit,
-// nuclei-style refresh of the local fingerprint cache from upstream.
+// nuclei-style refresh of the local databases from upstream. By default it
+// refreshes the CNAME fingerprint database; --ns-providers refreshes the NS
+// takeover provider list from indianajson/can-i-take-over-dns instead.
 func newUpdateCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:           "update",
-		Short:         "Refresh the local fingerprint database from upstream",
+	var nsProviders bool
+
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Refresh the local fingerprint and NS-provider databases from upstream",
+		Long: "update refreshes graverobber's local data caches from their canonical\n" +
+			"upstream sources.\n\n" +
+			"  graverobber update                 refresh the CNAME fingerprint database\n" +
+			"  graverobber update --ns-providers  refresh the NS takeover provider list",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if nsProviders {
+				return runNSProvidersUpdate(cmd.Context())
+			}
 			// v1.0 passes NoopSignatureVerifier: the upstream source is
 			// unsigned and HTTPS provides transport integrity (handoff Q3).
 			res, err := fingerprints.Update(cmd.Context(), fingerprints.NoopSignatureVerifier{})
@@ -150,6 +162,22 @@ func newUpdateCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&nsProviders, "ns-providers", false,
+		"refresh the NS takeover provider list from indianajson/can-i-take-over-dns instead of fingerprints")
+	return cmd
+}
+
+// runNSProvidersUpdate refreshes the cached NS-provider list and prints a diff
+// of the vulnerable-suffix set.
+func runNSProvidersUpdate(ctx context.Context) error {
+	res, err := nsproviders.Update(ctx)
+	if err != nil {
+		return fmt.Errorf("update --ns-providers: %w", err)
+	}
+	fmt.Printf("ns providers updated: %s\n", res.Path)
+	fmt.Printf("  total %d  (%d vulnerable; +%d added, -%d removed)\n",
+		res.Total, res.Vulnerable, res.Added, res.Removed)
+	return nil
 }
 
 // runScan executes a scan according to f. It is the body of the root command.
