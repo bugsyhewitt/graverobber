@@ -144,6 +144,8 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		}
 	case finding.VectorMTASTS:
 		detail = fmt.Sprintf("mta-sts policy host %s NXDOMAIN (dangling -> %s)", f.Service, f.CNAME)
+	case finding.VectorBIMI:
+		detail = fmt.Sprintf("bimi asset host %s NXDOMAIN (dangling brand logo/VMC)", f.BIMIURIHost)
 	}
 
 	_, err := fmt.Fprintf(t.w, "[%s] [%s] %s  %s\n",

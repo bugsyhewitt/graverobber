@@ -730,6 +730,71 @@ two new tests, one README example update. No new dependency.
 
 ---
 
+## Rank 18 — BIMI dangling-asset-host detection (eleventh vector) — ✅ IMPLEMENTED (Phase 2, Rotation 24)
+
+**Status:** Shipped. Rotation 24's directive offered two options — a **BIMI DNS
+record check** or a **DKIM key-rotation-age detector** — with instructions to
+assess the codebase first. Assessment found:
+
+- Neither BIMI nor any rotation/age logic existed in the codebase (the prior
+  roadmap, Ranks 1–17, was fully implemented).
+- The **DKIM key-rotation-age detector is not feasible passively** and was
+  rejected: a DKIM TXT key record carries no publication timestamp, and DNS
+  exposes none. "Rotation age" cannot be determined from DNS alone, so any such
+  detector would be guesswork or require out-of-band state — a poor fit for a
+  stateless, DNS-only, pipeline scanner. (The existing DKIM vector already covers
+  the two *exploitable* DKIM weaknesses: dangling CNAME and sub-1024-bit keys.)
+- **BIMI is the strong fit** and was implemented. It is a clean DNS-only signal in
+  exactly the SubdoMailing/dangling-host family the tool already specialises in.
+
+BIMI (Brand Indicators for Message Identification) publishes a `v=BIMI1` TXT
+record at `default._bimi.<domain>` whose `l=` (logo SVG URL) and optional `a=`
+(VMC certificate URL) point at HTTPS asset hosts. BIMI-aware clients (Gmail,
+Apple Mail, Yahoo, Fastmail) display the logo **only beside DMARC-passing mail**,
+so the logo is a recipient-facing trust mark. When an asset host is
+decommissioned but the BIMI record is left behind — a **dangling BIMI asset
+host** — an attacker who reclaims that host serves a forged brand logo/VMC,
+lending a spoofing campaign the exact visual trust signal BIMI exists to confer: a
+brand-impersonation surface, the same dangling-host pattern as CNAME/MX/SPF-
+include/DMARC-report/CAA-issuer/TLSA/MTA-STS, applied to the BIMI asset plane.
+
+The detector (`pkg/detectors/bimi.go`, `detectors.BIMI`) resolves
+`default._bimi.<target>` TXT, requires a `v=BIMI1` first field, parses the `l=`/`a=`
+URLs, extracts their hostnames, and probes each with `CNAMEChain` (the
+authoritative NXDOMAIN probe used by every other DNS-only vector). A dangling host
+yields a `POTENTIAL` `bimi` finding carrying the BIMI owner name in `Service` and
+the dangling host in the new `BIMIURIHost` field; the evidence names which tag
+pointed at it. Hosts backing both `l=` and `a=` are deduplicated to one finding
+that attributes both tags. The `a=self` and empty-value forms (no remote host) and
+non-http(s) URLs are never probed. A domain with no BIMI record, or whose asset
+hosts resolve, is the healthy case and is not flagged — low-noise, consistent with
+the other vectors.
+
+Wired end to end: new `finding.VectorBIMI` + `BIMIURIHost` field; `bimiVector` in
+the scanner with the `NoBIMI` opt-out; `--no-bimi` CLI flag; rendering in the
+terminal, CSV (`target` column), and SARIF (rule descriptor + message) outputs;
+and the vector added to `summaryVectorOrder` so the by-vector triage summary
+reconciles (the Rank 17 lesson). The stale `allEmittableVectors` test slice was
+also corrected to include `mtasts` (already shipped) and `bimi`.
+
+Guarded by 11 new detector tests (`pkg/detectors/bimi_test.go`): dangling logo
+host, dangling VMC host, shared-host dedup, live hosts (no finding), no record,
+non-BIMI TXT ignored, `self`/empty values ignored, evidence wording, case-
+insensitive version, URL-host parsing, and the vector-constant pin. Plus a BIMI
+case added to the terminal, CSV, and SARIF per-vector output tests. Suite grew
+191 → 202 test functions; full suite green, `go vet` clean.
+
+**Why this over the rotation detector:** A passive scanner cannot measure DKIM
+key age from DNS; BIMI is a real, exploitable, DNS-only dangling-host vector that
+extends the email-auth-trust surface the tool already owns. New API surface (one
+vector, one field, one flag), no architectural change.
+
+**Complexity:** Low-Med — one new detector file mirroring `mtasts.go`, one finding
+field + vector constant, scanner/CLI/output wiring, 11 detector tests. No new
+dependency (uses the existing `miekg/dns` resolver and stdlib `net/url`).
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -767,3 +832,4 @@ two new tests, one README example update. No new dependency.
 | 15 | DMARC monitor-only (`p=none`) policy detection ✅ | Low | High (completes DMARC coverage, spoofable domain) | Yes (new field, no flag) |
 | 16 | CAA misconfiguration (8th vector) ✅ | Low-Med | High (new DNS-security surface, MITM TLS) | Yes (new vector + flag) |
 | 17 | Triage summary by-vector completeness (AXFR/CAA) ✅ | Trivial | High (default-mode correctness) | No |
+| 18 | BIMI dangling-asset-host detection (11th vector) ✅ | Low-Med | High (new email-auth-trust surface, brand-impersonation) | Yes (new vector + field + flag) |

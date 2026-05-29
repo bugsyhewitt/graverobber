@@ -166,6 +166,11 @@ var vectorRuleText = map[finding.Vector]struct {
 		"An MTA-STS policy is advertised but its policy host is NXDOMAIN.",
 		"A domain advertises SMTP MTA-STS (RFC 8461) via a \"v=STSv1\" TXT record at _mta-sts.<domain>, but its policy host mta-sts.<domain> — which serves the policy file at https://mta-sts.<domain>/.well-known/mta-sts.txt — is NXDOMAIN. An attacker who reclaims the dangling policy host can serve a forged policy that disables TLS enforcement (mode: none) or authorises an attacker-controlled MX, re-opening the active TLS-downgrade and mail-redirection attacks MTA-STS exists to close.",
 	},
+	finding.VectorBIMI: {
+		"Dangling BIMI asset host",
+		"A BIMI record's logo or VMC URL points at a host that is NXDOMAIN.",
+		"A domain advertises BIMI (Brand Indicators for Message Identification) via a \"v=BIMI1\" TXT record whose l= (logo) or a= (VMC certificate) URL points at a host that is NXDOMAIN. BIMI-aware mail clients display the logo beside DMARC-passing mail from the domain as a visual mark of authenticity; an attacker who reclaims the dangling asset host can serve a forged brand logo (and, where the VMC host is the reclaimed one, a forged VMC), lending a spoofing campaign the exact trust signal BIMI exists to confer — a brand-impersonation surface.",
+	},
 }
 
 // ruleForVector builds the SARIF rule descriptor for a vector. Unknown vectors
@@ -290,6 +295,8 @@ func sarifMessage(f finding.Finding) string {
 		}
 	case finding.VectorMTASTS:
 		detail = fmt.Sprintf("MTA-STS policy host %s is NXDOMAIN (dangling — reclaimable target %s)", f.Service, f.CNAME)
+	case finding.VectorBIMI:
+		detail = fmt.Sprintf("BIMI asset host %s is NXDOMAIN (dangling — reclaimable to serve a forged brand logo/VMC)", f.BIMIURIHost)
 	}
 	msg := fmt.Sprintf("[%s] %s takeover candidate on %s", f.Confidence, f.Vector, f.Subdomain)
 	if detail != "" {

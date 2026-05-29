@@ -151,6 +151,10 @@ func csvTarget(f finding.Finding) string {
 			return fmt.Sprintf("%s -> %s (NXDOMAIN)", f.Service, f.CNAME)
 		}
 		return fmt.Sprintf("%s (NXDOMAIN)", f.Service)
+	case finding.VectorBIMI:
+		// The dangling BIMI asset host (logo/VMC URL host) is the actionable
+		// target the attacker would reclaim.
+		return fmt.Sprintf("%s (NXDOMAIN)", f.BIMIURIHost)
 	default:
 		return ""
 	}

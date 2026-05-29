@@ -167,6 +167,7 @@ func TestSARIF_MessageSurfacesVectorDetail(t *testing.T) {
 		{"dkim", finding.Finding{Subdomain: "example.com", Vector: finding.VectorDKIM, Confidence: finding.Confirmed, DKIMSelector: "s1", CNAME: "s1.domainkey.gone.sendgrid.net"}, "s1.domainkey.gone.sendgrid.net"},
 		{"dmarc", finding.Finding{Subdomain: "example.com", Vector: finding.VectorDMARC, Confidence: finding.Potential, DMARCURI: "reports.gone.net"}, "reports.gone.net"},
 		{"axfr", finding.Finding{Subdomain: "example.com", Vector: finding.VectorAXFR, Confidence: finding.Confirmed, Service: "ns1.example.com", Nameservers: []string{"ns1.example.com"}, LeakedHosts: []string{"admin.example.com"}}, "ns1.example.com"},
+		{"bimi", finding.Finding{Subdomain: "example.com", Vector: finding.VectorBIMI, Confidence: finding.Potential, Service: "default._bimi.example.com", BIMIURIHost: "images.gone.net"}, "images.gone.net"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

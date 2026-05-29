@@ -181,6 +181,15 @@ func TestTerminalWriter_RendersDetailForEveryVector(t *testing.T) {
 			},
 			wantSub: []string{"example.com", "any CA", "caa"},
 		},
+		{
+			name: "bimi",
+			f: finding.Finding{
+				Subdomain: "example.com", Vector: finding.VectorBIMI,
+				Confidence: finding.Potential, Service: "default._bimi.example.com",
+				BIMIURIHost: "images.gone.net",
+			},
+			wantSub: []string{"example.com", "images.gone.net", "bimi"},
+		},
 	}
 
 	for _, tc := range cases {
