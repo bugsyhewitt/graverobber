@@ -157,6 +157,22 @@ func TestTerminalWriter_RendersDetailForEveryVector(t *testing.T) {
 			},
 			wantSub: []string{"example.com", "ns1.example.com", "axfr"},
 		},
+		{
+			name: "caa-dangling-issuer",
+			f: finding.Finding{
+				Subdomain: "example.com", Vector: finding.VectorCAA,
+				Confidence: finding.Potential, CAAIssuer: "ca.gone.invalid",
+			},
+			wantSub: []string{"example.com", "ca.gone.invalid", "caa"},
+		},
+		{
+			name: "caa-permissive",
+			f: finding.Finding{
+				Subdomain: "example.com", Vector: finding.VectorCAA,
+				Confidence: finding.Potential,
+			},
+			wantSub: []string{"example.com", "any CA", "caa"},
+		},
 	}
 
 	for _, tc := range cases {

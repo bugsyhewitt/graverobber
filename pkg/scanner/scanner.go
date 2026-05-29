@@ -32,6 +32,7 @@ type Options struct {
 	NoDKIM        bool          // skip the DKIM selector vector
 	NoDMARC       bool          // skip the DMARC report-domain vector
 	NoAXFR        bool          // skip the AXFR zone-transfer vector
+	NoCAA         bool          // skip the CAA misconfiguration vector
 	HTTPOnly      bool          // probe services over HTTP only
 	HTTPSOnly     bool          // probe services over HTTPS only
 	Resolvers     []string      // custom recursive DNS resolvers
@@ -162,6 +163,9 @@ var (
 	axfrVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
 		return detectors.AXFR(ctx, target, s.resolver)
 	}
+	caaVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.CAA(ctx, target, s.resolver)
+	}
 )
 
 // scanTarget runs the per-target detection pipeline and emits any findings.
@@ -178,7 +182,7 @@ var (
 // as before, so output semantics are unchanged.
 func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.Map, out chan<- finding.Finding) {
 	// Select the enabled vectors. CNAME always runs; NS, SPF, MX, DKIM, DMARC,
-	// and AXFR are opt-out.
+	// AXFR, and CAA are opt-out.
 	vectors := []vectorFunc{cnameVector}
 	if !s.opts.NoNS {
 		vectors = append(vectors, nsVector)
@@ -197,6 +201,9 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.M
 	}
 	if !s.opts.NoAXFR {
 		vectors = append(vectors, axfrVector)
+	}
+	if !s.opts.NoCAA {
+		vectors = append(vectors, caaVector)
 	}
 
 	// Fan out: run each enabled vector concurrently, collecting findings into a

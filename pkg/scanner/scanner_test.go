@@ -490,6 +490,55 @@ func TestRun_NoAXFRDisablesAXFRVector(t *testing.T) {
 	}
 }
 
+// TestRun_NoCAADisablesCAAVector verifies that when NoCAA is set the caaVector
+// function is not called, and that when NoCAA is false it is called once. CAA is
+// opt-out (on by default), mirroring the other DNS vectors.
+func TestRun_NoCAADisablesCAAVector(t *testing.T) {
+	origCAA := caaVector
+	t.Cleanup(func() { caaVector = origCAA })
+
+	var caaCalls int32
+	caaVector = func(_ context.Context, _ *Scanner, _ string) ([]finding.Finding, error) {
+		atomic.AddInt32(&caaCalls, 1)
+		return nil, nil
+	}
+
+	db, err := fingerprints.Load([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("load db: %v", err)
+	}
+
+	runWith := func(noCAA bool) int32 {
+		atomic.StoreInt32(&caaCalls, 0)
+		sc := New(db, Options{
+			Concurrency: 1,
+			Timeout:     200 * time.Millisecond,
+			NoNS:        true,
+			NoSPF:       true,
+			NoMX:        true,
+			NoDKIM:      true,
+			NoDMARC:     true,
+			NoAXFR:      true,
+			NoCAA:       noCAA,
+		})
+		targets := make(chan string, 1)
+		targets <- "sub.example.com"
+		close(targets)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		for range sc.Run(ctx, targets) {
+		}
+		return atomic.LoadInt32(&caaCalls)
+	}
+
+	if got := runWith(true); got != 0 {
+		t.Errorf("NoCAA=true: caaVector called %d times, want 0", got)
+	}
+	if got := runWith(false); got != 1 {
+		t.Errorf("NoCAA=false: caaVector called %d times, want 1", got)
+	}
+}
+
 // ---- --min-confidence filter ----------------------------------------------
 
 // TestRun_MinConfidenceFiltersWeakerFindings stubs the CNAME vector to emit one

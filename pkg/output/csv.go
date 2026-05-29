@@ -122,6 +122,13 @@ func csvTarget(f finding.Finding) string {
 	case finding.VectorAXFR:
 		// The leaking nameserver is the actionable target; Service holds it.
 		return f.Service
+	case finding.VectorCAA:
+		if f.CAAIssuer != "" {
+			return f.CAAIssuer
+		}
+		// The permissive sub-case has no remote target; the misconfigured
+		// domain itself (the subdomain column) is the actionable item.
+		return "* (any CA)"
 	default:
 		return ""
 	}
