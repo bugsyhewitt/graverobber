@@ -932,6 +932,68 @@ stdlib; the `miekg/dns` resolver already returns `iodef` CAA records).
 
 ---
 
+## Rank 21 — SPF `a:`/`mx:` mechanism dangling detection — ✅ IMPLEMENTED (Phase 2, Rotation 27)
+
+**Status:** Shipped. Rotation 27's directive offered two candidates — a **TLSA/DANE
+orphaned-pin for a new MX host** or a **DKIM selector dangling-key** check — as the
+14th DNS attack vector, with instructions to assess the codebase first. Assessment
+found **both directed candidates already shipped**, so per the directive (the same
+disposition as Rank 20) the next logical roadmap improvement was implemented:
+
+- **TLSA/DANE orphaned-pin is already shipped.** `detectors.TLSA` (the 9th vector)
+  already iterates **every** MX host of the target, probes the DANE pin at
+  `_25._tcp.<mxhost>`, and emits a `POTENTIAL tlsa` finding when the pinned MX host
+  is NXDOMAIN. There is no "new MX host" case it omits — it already covers all of
+  them, with per-host dedup. Re-implementing it would duplicate existing coverage.
+- **DKIM selector dangling-key is already shipped.** `detectors.DKIM` already emits
+  a `CONFIRMED dkim` finding for a selector whose `_domainkey` CNAME target is
+  NXDOMAIN (Rank 6) and a `LIKELY dkim` finding for a weak inline RSA key below the
+  RFC 8301 floor (Rank 14). Re-implementing it would duplicate existing coverage.
+
+The genuine gap found in the SPF detector: it recursed `include:` and `redirect=`
+references but **silently ignored the `a:<domain>` and `mx:<domain>` mechanisms**
+(RFC 7208 §5.3/§5.4). With an explicit domain argument these mechanisms authorise
+the named domain's A/AAAA (or MX-host) address records to send mail as the target.
+If that domain is NXDOMAIN, an attacker who registers it points its address records
+at their own host and **every message they send passes SPF for the target** — the
+exact same SubdoMailing takeover the `include:`/`redirect=` sub-case covers, on two
+mechanisms the detector previously skipped. This completes SPF dangling-reference
+coverage end to end (`include:` + `redirect=` + `a:` + `mx:`).
+
+This was implemented as an **extension of the existing `spf` vector**, not a new
+vector: no new vector constant, no new finding field (reuses `SPFInclude` for the
+claimable domain), no new CLI flag (covered by the existing `--no-spf` opt-out).
+`spfReference` gained a `directive` string (replacing the boolean `redirect` flag)
+so the evidence string names which of the four directives pointed at the dangling
+host; `spfReferences` now strips a mechanism qualifier prefix and parses `a:`/`mx:`
+via a new `spfDualCIDRDomain` helper that strips the RFC 7208 `/cidr`//`/cidr`
+dual-CIDR suffix. Bare `a`/`mx` (no `:domain`) reference the target's own records
+and are intentionally NOT extracted. `a:`/`mx:` references are terminal (they name
+an address host, not a downstream SPF policy), so only `include:`/`redirect=`
+recurse — bounded as before by the RFC 7208 ten-lookup cap.
+
+Guarded by 4 new full-detector tests plus an expanded `TestSPFReferences` table
+(`pkg/detectors/detectors_test.go`, driven by the existing local-UDP `spfDNSServer`
+harness — integration-first, real DNS round-trips): `a:` dangling (with dual-CIDR
+suffix), `mx:` dangling, bare-`a`/`mx`-no-finding (proves the target's own records
+are never probed as external), and live-`a:`-no-finding. Full suite green, `go vet`
+clean. README SPF section, vector table, `--no-spf` flag doc, the SARIF rule
+description, and the `VectorSPF`/`SPFInclude` doc comments updated to the four
+directives.
+
+**Why this over re-implementing a directed candidate:** both directed candidates
+were already shipped (verified in-code), and the directive instructs picking the
+next logical roadmap improvement in that case. The `a:`/`mx:` mechanisms are a
+genuinely new, exploitable-by-omission, DNS-only signal on a record the detector
+already parses but previously ignored — closing SPF reference coverage with zero
+new API surface, mirroring the Rank 20 `iodef` disposition exactly.
+
+**Complexity:** Low — one parser branch + one helper, a struct-field swap, no new
+vector/field/flag, 4 new tests + 1 expanded table, README + doc-comment + SARIF
+updates. No new dependency.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -972,3 +1034,4 @@ stdlib; the `miekg/dns` resolver already returns `iodef` CAA records).
 | 18 | BIMI dangling-asset-host detection (11th vector) ✅ | Low-Med | High (new email-auth-trust surface, brand-impersonation) | Yes (new vector + field + flag) |
 | 19 | DNSSEC orphaned-DS detection (12th vector) ✅ | Low-Med | High (new availability surface, self-inflicted SERVFAIL outage) | Yes (new vector + field + flag) |
 | 20 | CAA `iodef` dangling-report-host detection ✅ | Low | High (completes CAA coverage, report interception) | No (3rd sub-case of `caa`, reuses field + flag) |
+| 21 | SPF `a:`/`mx:` mechanism dangling detection ✅ | Low | High (completes SPF reference coverage, same SubdoMailing takeover) | No (extends `spf`, reuses field + flag) |

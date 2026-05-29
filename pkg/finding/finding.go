@@ -20,7 +20,7 @@ const (
 	// and is re-claimable.
 	VectorNS Vector = "ns"
 	// VectorSPF: an SPF record is either dangling or permissive. In the dangling
-	// sub-case an include:/redirect= directive references a domain that is
+	// sub-case an include:/redirect=/a:/mx: directive references a domain that is
 	// unregistered and therefore claimable (the SubdoMailing vector); the
 	// SPFInclude field carries the claimable domain. In the permissive sub-case
 	// the record's "all" mechanism qualifies as Pass (+all, or a bare "all" which
@@ -189,7 +189,7 @@ type Finding struct {
 	// failed to answer authoritatively.
 	Nameservers []string `json:"nameservers,omitempty"`
 	// SPFInclude is set for the dangling VectorSPF sub-case: the claimable
-	// include:/redirect= domain.
+	// include:/redirect=/a:/mx: domain.
 	SPFInclude string `json:"spf_include,omitempty"`
 	// SPFAll is set for the permissive VectorSPF sub-case: the offending "all"
 	// mechanism token ("+all" or a bare "all") whose qualifier is Pass, which

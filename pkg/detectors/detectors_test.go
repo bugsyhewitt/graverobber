@@ -1129,10 +1129,10 @@ func TestDMARC_NoRecordNoFinding(t *testing.T) {
 
 // ---- SPF redirect= modifier ------------------------------------------------
 
-// TestSPFReferences verifies that include: mechanisms and the redirect=
-// modifier are both extracted, in record order, with case-folding and the
-// redirect flag set correctly. Non-referencing mechanisms (ip4, a, mx, all)
-// must be ignored.
+// TestSPFReferences verifies that the include:, a:, and mx: mechanisms and the
+// redirect= modifier are all extracted, in record order, with case-folding and
+// the directive tag set correctly. Bare a/mx mechanisms (no ":domain"), ip4/ip6,
+// and all must be ignored, and the dual-CIDR suffix on a:/mx: must be stripped.
 func TestSPFReferences(t *testing.T) {
 	cases := []struct {
 		record string
@@ -1140,18 +1140,34 @@ func TestSPFReferences(t *testing.T) {
 	}{
 		{
 			"v=spf1 include:_spf.example.com -all",
-			[]spfReference{{domain: "_spf.example.com"}},
+			[]spfReference{{domain: "_spf.example.com", directive: "include:"}},
 		},
 		{
 			"v=spf1 redirect=_spf.example.net",
-			[]spfReference{{domain: "_spf.example.net", redirect: true}},
+			[]spfReference{{domain: "_spf.example.net", directive: "redirect="}},
 		},
 		{
-			// both directives, mixed case, plus ignorable mechanisms
-			"v=spf1 ip4:1.2.3.0/24 include:A.Example.COM a mx redirect=B.Example.NET ~all",
+			// bare a/mx reference the target's own records — NOT extracted.
+			"v=spf1 ip4:1.2.3.0/24 a mx -all",
+			nil,
+		},
+		{
+			// a:/mx: with explicit domains ARE extracted; dual-CIDR is stripped;
+			// qualifier prefixes are stripped; case is folded.
+			"v=spf1 +a:Mail.Example.COM -mx:Smtp.Example.NET/24 ~all",
 			[]spfReference{
-				{domain: "a.example.com"},
-				{domain: "b.example.net", redirect: true},
+				{domain: "mail.example.com", directive: "a:"},
+				{domain: "smtp.example.net", directive: "mx:"},
+			},
+		},
+		{
+			// all four directives, in record order.
+			"v=spf1 include:i.example.com a:a.example.com mx:m.example.com//64 redirect=r.example.com -all",
+			[]spfReference{
+				{domain: "i.example.com", directive: "include:"},
+				{domain: "a.example.com", directive: "a:"},
+				{domain: "m.example.com", directive: "mx:"},
+				{domain: "r.example.com", directive: "redirect="},
 			},
 		},
 		{
@@ -1425,6 +1441,130 @@ func TestSPF_PermissiveAndDanglingBothFire(t *testing.T) {
 	}
 	if !sawDangling {
 		t.Error("expected a dangling-reference finding (SPFInclude set)")
+	}
+}
+
+// TestSPF_DanglingAMechanismPotential drives the full SPF detector: a policy
+// whose a:<domain> mechanism names an NXDOMAIN domain must yield exactly one
+// Potential VectorSPF finding whose evidence names the a: directive. The
+// dual-CIDR suffix must not prevent the match.
+func TestSPF_DanglingAMechanismPotential(t *testing.T) {
+	const (
+		target  = "example.com"
+		aTarget = "mail.deleted-vendor.invalid"
+	)
+	record := "v=spf1 a:" + aTarget + "/24 -all"
+
+	addr, cleanup := spfDNSServer(t, target, record, aTarget)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Vector != finding.VectorSPF {
+		t.Errorf("vector: got %q, want spf", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("confidence: got %q, want POTENTIAL", f.Confidence)
+	}
+	if f.SPFInclude != aTarget {
+		t.Errorf("spf_include: got %q, want %q", f.SPFInclude, aTarget)
+	}
+	if f.Subdomain != aTarget {
+		t.Errorf("subdomain: got %q, want %q", f.Subdomain, aTarget)
+	}
+	if !strings.Contains(f.Evidence, "a:") {
+		t.Errorf("evidence: got %q, want it to mention the a: directive", f.Evidence)
+	}
+}
+
+// TestSPF_DanglingMXMechanismPotential drives the full SPF detector: a policy
+// whose mx:<domain> mechanism names an NXDOMAIN domain must yield exactly one
+// Potential VectorSPF finding whose evidence names the mx: directive.
+func TestSPF_DanglingMXMechanismPotential(t *testing.T) {
+	const (
+		target   = "example.com"
+		mxTarget = "smtp.deleted-vendor.invalid"
+	)
+	record := "v=spf1 mx:" + mxTarget + " -all"
+
+	addr, cleanup := spfDNSServer(t, target, record, mxTarget)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.SPFInclude != mxTarget {
+		t.Errorf("spf_include: got %q, want %q", f.SPFInclude, mxTarget)
+	}
+	if !strings.Contains(f.Evidence, "mx:") {
+		t.Errorf("evidence: got %q, want it to mention the mx: directive", f.Evidence)
+	}
+}
+
+// TestSPF_BareAMechanismNoFinding verifies that a bare "a" mechanism (no
+// ":domain" argument — it references the target's OWN records) is never treated
+// as an external reference and never produces a finding, even when the target
+// itself is the NXDOMAIN name in the test server.
+func TestSPF_BareAMechanismNoFinding(t *testing.T) {
+	const target = "example.com"
+	record := "v=spf1 a mx a/24 -all"
+
+	// Make the target the NXDOMAIN name to prove a bare a/mx never probes it as a
+	// claimable external reference.
+	addr, cleanup := spfDNSServer(t, target, record, target)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings for bare a/mx mechanisms, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestSPF_LiveAMechanismNoFinding verifies that an a:<domain> mechanism whose
+// domain resolves (exists) produces no finding.
+func TestSPF_LiveAMechanismNoFinding(t *testing.T) {
+	const target = "example.com"
+	record := "v=spf1 a:live.example.net -all"
+
+	addr, cleanup := spfDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings for live a: domain, got %d: %+v", len(findings), findings)
 	}
 }
 
