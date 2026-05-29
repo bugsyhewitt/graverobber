@@ -109,6 +109,11 @@ func csvTarget(f finding.Finding) string {
 		if f.SPFAll != "" {
 			return f.SPFAll + " (permissive)"
 		}
+		// Lookup-limit sub-case has no remote target either; the offending count
+		// is the actionable datum.
+		if f.SPFLookups > 0 {
+			return fmt.Sprintf("%d DNS lookups (permerror)", f.SPFLookups)
+		}
 		return ""
 	case finding.VectorNS:
 		return strings.Join(f.Nameservers, " ")

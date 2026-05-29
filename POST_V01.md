@@ -1135,6 +1135,77 @@ new dependency (`net/url` is stdlib; the resolver already returns the TXT record
 
 ---
 
+## Rank 24 — SPF DNS-lookup-limit (`permerror`) detection — ✅ IMPLEMENTED (Phase 2, Rotation 30)
+
+**Status:** Shipped. Rotation 30's directive named two candidates — **SPF
+include-depth** or **DKIM key-rotation** — as the next vector to assess.
+Assessment of the codebase confirmed **neither was shipped**; both names point at
+the same real gap on the SPF surface (the RFC 7208 §4.6.4 ten-DNS-lookup cap), so
+the directive's first-named candidate was implemented in its full RFC form.
+
+RFC 7208 §4.6.4 caps an SPF evaluation at **ten DNS-querying mechanisms and
+modifiers** — `include`, `a`, `mx`, `ptr`, `exists`, and `redirect=` each count
+as one lookup; `ip4`, `ip6`, `exp=`, `all`, and the version tag do not. A record
+whose total (across the apex and every recursed `include:`/`redirect=` target)
+exceeds ten MUST yield a `permerror` at every conforming SPF receiver — the SPF
+check hard-fails, and under DMARC alignment the domain becomes **spoofable by
+omission**: every receiver treats spoofed mail the same as legitimate mail
+because SPF cannot return Pass for either. This is the SPF analog of the DMARC
+`p=none` weak-policy sub-case (Rank 15): a present-but-broken email-auth record
+that confers no protection. It is a common production failure mode — the
+"include explosion" antipattern, where a domain accrues ESPs over time and quietly
+slips past the ten-lookup threshold without anyone noticing until the receivers
+start `permerror`ing weeks of legitimate mail.
+
+Implemented as an **extension of the existing `spf` vector**, not a new vector:
+one new finding field (`SPFLookups int`, mirroring the `DKIMKeyBits` integer
+sub-case-discriminator shape from Rank 14), no new CLI flag (covered by the
+existing `--no-spf` opt-out). The detector adds two helpers: `spfQueryingMechanisms`
+tallies the §4.6.4-counted mechanisms in a single record (with the qualifier-prefix
+strip and the bare-`a`/`mx`/`ptr` plus `/cidr` form handling RFC 7208 §5.3-5.5
+requires; `all`/`exp=` are deliberately excluded), and `spfDNSLookups` walks the
+recursed include/redirect graph and sums the per-record counts. The graph walk
+reuses the existing `spfReferences` parser, a per-call `visited` map for
+cycle-safety (include loops are independently a `permerror` and would otherwise
+stack-overflow), and the same `maxSPFDepth` hard recursion guard as the dangling
+traversal. The lookup-limit and dangling traversals share no state — each
+sub-case fires independently of the others, mirroring the Rank 18 (`p=none` +
+dangling) two-sub-case shape.
+
+Guarded by five new tests in `pkg/detectors/detectors_test.go`: a
+`spfQueryingMechanisms` unit table covering every counted/uncounted mechanism
+and modifier, every form-suffix (`:`, `/`, `//`), qualifier-prefix strip,
+`exp=` exclusion, false-match guards (`all` vs `a`), and exactly-at-cap; a new
+`spfMultiTXTDNSServer` integration harness driving the full detector against a
+multi-domain TXT zone; an over-cap (12-lookup) finding case asserting field
+shape, evidence string, and target-keyed subdomain; an at-cap (10-lookup)
+no-finding case; a below-cap (3-lookup) no-finding case (the common-path
+regression guard); and a cyclic include-graph (A → B → A) case verifying the
+visited-map short-circuits the cycle and yields a deterministic count.
+Output-rendering tests in `pkg/output/{output,csv,sarif}_test.go` were extended
+with a lookup-limit case for the terminal, CSV, and SARIF writers, and the
+JSONL omit-empty-fields regression guard was extended with the new
+`spf_lookups` field name. Full suite green under `-race`; `go vet` clean. README
+"Why these vectors" table, the SPF section (now three sub-cases, with the
+"DNS-lookup-limit breach" prose, the §4.6.4 wording, and a new JSONL example
+line), the `--no-spf` flag-table description, the cobra `--no-spf` flag short
+help, the SARIF rule descriptor (`name`/`short`/`full` all updated), the
+`VectorSPF` doc-comment in `finding.go`, and the `SPF` detector doc-comment
+were all updated to cover the new sub-case. No new dependency.
+
+**Why this over a DKIM key-rotation check:** DKIM key rotation cannot be detected
+from a single DNS scan — it requires per-selector history (when did this key
+first appear?). graverobber is a stateless single-shot scanner; history belongs
+to the orchestration layer (cron + diff). The SPF §4.6.4 cap is the **DNS-only
+single-scan signal** the directive's two candidates collapse to in this codebase.
+
+**Complexity:** Low — one new helper pair (`spfQueryingMechanisms` +
+`spfDNSLookups`), one new finding field, no new vector/flag, five new detector
+tests + four extended output tests, README + SARIF + CLI help + doc-comment
+updates. No new dependency.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -1178,3 +1249,4 @@ new dependency (`net/url` is stdlib; the resolver already returns the TXT record
 | 21 | SPF `a:`/`mx:` mechanism dangling detection ✅ | Low | High (completes SPF reference coverage, same SubdoMailing takeover) | No (extends `spf`, reuses field + flag) |
 | 22 | TLSRPT dangling-report-destination detection (13th vector) ✅ | Low-Med | High (new SMTP-TLS reporting surface, report interception + downgrade-masking) | Yes (new vector + field + flag) |
 | 23 | DMARC `https:` report-URI dangling-host detection ✅ | Low | High (completes DMARC report-URI coverage, same report interception) | No (extends `dmarc`, reuses field + flag) |
+| 24 | SPF DNS-lookup-limit (§4.6.4 `permerror`) detection ✅ | Low | High (completes SPF coverage, spoofable-by-omission via DMARC alignment collapse) | Yes (new field, no flag) |

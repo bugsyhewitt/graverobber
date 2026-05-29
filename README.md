@@ -21,7 +21,7 @@ a recon pipeline.
 |---|---|---|
 | CNAME | Dangling CNAME → fingerprint match against a known-vulnerable service | The classic takeover; ~60+ services covered |
 | NS    | Delegated DNS hosted zone deleted at the provider, re-claimable | Hazy Hawk (.edu campaign, 2025–2026) |
-| SPF   | An SPF `include:`/`redirect=`/`a:`/`mx:` directive points at an unregistered, claimable domain, **or** the policy ends in `+all` (Pass — any host may send mail as the domain) | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day; `+all` = fully spoofable domain |
+| SPF   | An SPF `include:`/`redirect=`/`a:`/`mx:` directive points at an unregistered, claimable domain, the policy ends in `+all` (Pass — any host may send mail as the domain), **or** the recursed evaluation exceeds the RFC 7208 §4.6.4 ten-lookup cap (`permerror` — SPF hard-fails everywhere) | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day; `+all` = fully spoofable domain; lookup-explosion `permerror` = the same spoofable-by-omission outcome under DMARC alignment |
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, **or** publishes an inline RSA key below the RFC 8301 1024-bit floor | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012) |
 | DMARC | A `_dmarc` policy is monitor-only (`p=none`, spoofable) **or** its `rua=`/`ruf=` report host — a `mailto:` domain or `https:` collector host — is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon; `p=none` spoofing (BEC/phishing precondition) |
@@ -255,7 +255,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--silent` | false | Results only, suppress progress/banner |
 | `--verbose` | false | Verbose debug logging to stderr |
 | `--no-ns` | false | Skip NS takeover checks |
-| `--no-spf` | false | Skip SPF `include:`/`redirect=`/`a:`/`mx:` dangling and `+all` permissive-policy checks |
+| `--no-spf` | false | Skip SPF `include:`/`redirect=`/`a:`/`mx:` dangling, `+all` permissive-policy, and RFC 7208 §4.6.4 DNS-lookup-limit checks |
 | `--no-mx` | false | Skip MX dangling-record checks |
 | `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME + weak inline RSA key) |
 | `--no-dmarc` | false | Skip DMARC report-host dangling + `p=none` checks |
@@ -318,8 +318,8 @@ above a `confirmed` threshold. The default (flag omitted) emits every finding.
 
 ### SPF policy takeover (`--no-spf`)
 
-graverobber flags two classes of SPF weakness: a **dangling reference** and a
-**permissive policy**.
+graverobber flags three classes of SPF weakness: a **dangling reference**, a
+**permissive policy**, and an **RFC 7208 §4.6.4 DNS-lookup-limit breach**.
 
 **Dangling reference.** An SPF record can authorise another domain to send mail
 as the target four ways, and all four are exploitable when that domain is
@@ -364,7 +364,25 @@ finding keyed on the target itself (not an external domain), with the offending
 mechanism token in the `spf_all` field; `-all`, `~all`, and `?all` are never
 flagged.
 
-Both sub-cases are DNS-only signals with no fingerprint — classified
+**DNS-lookup-limit breach.** [RFC 7208 §4.6.4](https://www.rfc-editor.org/rfc/rfc7208#section-4.6.4)
+caps an SPF evaluation at **ten** DNS-querying mechanisms and modifiers:
+`include`, `a`, `mx`, `ptr`, `exists`, and `redirect=` each count as one lookup;
+`ip4`, `ip6`, `exp=`, `all`, and the version tag do not. A record whose total
+(across the apex and every recursed `include:`/`redirect=` target) exceeds ten
+**MUST** produce a `permerror` — every conforming SPF receiver hard-fails the
+check, taking down DMARC alignment and leaving the domain spoofable by omission.
+This is the email-auth equivalent of misconfiguring the policy into a no-op: the
+record exists, but it is structurally guaranteed to fail at evaluation time. It
+is a common production failure mode (the "include explosion" antipattern as
+domains accrue ESPs over time). graverobber walks the same `include:`/`redirect=`
+graph the dangling traversal uses and tallies every DNS-querying mechanism in
+each reachable policy; when the total exceeds ten, it emits a `POTENTIAL` `spf`
+finding keyed on the target itself, with the offending count in the
+`spf_lookups` field. The cycle-safe `visited`-map traversal prevents infinite
+recursion on include loops (which are independently a `permerror`, RFC 7208
+§4.6.4) without distorting the count.
+
+All three sub-cases are DNS-only signals with no fingerprint — classified
 `POTENTIAL` like the rest of the email-auth surface — and can fire independently
 for the same record.
 
@@ -726,6 +744,7 @@ JSONL — one finding per line:
 {"subdomain":"reports.deleted-vendor.net","vector":"dmarc","confidence":"POTENTIAL","dmarc_uri":"reports.deleted-vendor.net","evidence":"DMARC rua/ruf report host is NXDOMAIN (claimable — report interception)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"dmarc","confidence":"POTENTIAL","dmarc_policy":"none","evidence":"DMARC policy is p=none with no rua= aggregate reporting (no enforcement and no visibility)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"spoofable.example.com","vector":"spf","confidence":"POTENTIAL","spf_all":"+all","evidence":"SPF policy ends in +all (Pass — authorises any host to send mail as the domain; domain is spoofable)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"permerror.example.com","vector":"spf","confidence":"POTENTIAL","spf_lookups":12,"evidence":"SPF evaluation requires 12 DNS-querying mechanisms (RFC 7208 §4.6.4 caps at 10 — receivers return permerror; SPF check hard-fails)","timestamp":"2026-05-29T12:00:00Z"}
 {"subdomain":"example.com","vector":"axfr","service":"ns1.example.com","confidence":"CONFIRMED","nameservers":["ns1.example.com"],"leaked_hosts":["admin.example.com","vpn.example.com"],"evidence":"nameserver ns1.example.com allowed unauthenticated AXFR (412 records leaked; sample: admin.example.com, vpn.example.com)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"tlsa","confidence":"POTENTIAL","mx_hosts":["mx.deleted-vendor.invalid"],"tlsa_name":"_25._tcp.mx.deleted-vendor.invalid","evidence":"DANE TLSA pin published at _25._tcp.mx.deleted-vendor.invalid but MX host mx.deleted-vendor.invalid is NXDOMAIN (dangling DANE pin — hard-fails inbound mail; reclaimable for DANE-trusted interception)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"mtasts","service":"mta-sts.example.com","confidence":"POTENTIAL","cname":"policy.deleted-vendor.invalid","evidence":"MTA-STS policy advertised at _mta-sts.example.com but policy host mta-sts.example.com is NXDOMAIN (dangling MTA-STS host — reclaimable to serve a forged policy that disables TLS enforcement or redirects mail)","timestamp":"2026-05-28T12:00:00Z"}
@@ -737,7 +756,8 @@ JSONL — one finding per line:
 Without `--json`, findings render as one coloured human-readable line per
 finding. Each line carries the confidence tier, the vector tag, the subdomain,
 and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
-`include:`/`redirect=` domain or the permissive `+all` mechanism (`spf`), the
+`include:`/`redirect=` domain, the permissive `+all` mechanism, or the
+DNS-lookup count when it exceeds the RFC 7208 §4.6.4 cap of ten (`spf`), the
 failed nameservers (`ns`), the dangling
 mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation or
 weak inline RSA key size (`dkim`), the claimable `rua`/`ruf` report host

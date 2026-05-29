@@ -1711,6 +1711,267 @@ func TestSPF_LiveAMechanismNoFinding(t *testing.T) {
 	}
 }
 
+// ---- SPF DNS-lookup-limit sub-vector ---------------------------------------
+
+// TestSPFQueryingMechanisms is a table-driven check of the §4.6.4 lookup
+// counter. Every DNS-querying mechanism and modifier (include, a, mx, ptr,
+// exists, redirect=) MUST contribute one count; ip4, ip6, exp, all, and the
+// version tag MUST NOT. Both the bare and ":domain"/"=domain"/"/cidr" forms of
+// the address-family mechanisms count, qualifier prefixes are stripped, and
+// tokens that merely start with a counted name (e.g. "all" vs "a") are not
+// false-matched.
+func TestSPFQueryingMechanisms(t *testing.T) {
+	cases := []struct {
+		record string
+		want   int
+	}{
+		// No DNS lookups at all (ip4/ip6/all/version tag are free).
+		{"v=spf1 ip4:192.0.2.0/24 ip6:2001:db8::/32 -all", 0},
+		{"v=spf1 -all", 0},
+		// Single occurrences of every counted mechanism / modifier.
+		{"v=spf1 include:_spf.example.net -all", 1},
+		{"v=spf1 a -all", 1},
+		{"v=spf1 a:mail.example.net -all", 1},
+		{"v=spf1 a/24 -all", 1},
+		{"v=spf1 mx -all", 1},
+		{"v=spf1 mx:mail.example.net -all", 1},
+		{"v=spf1 mx/24//64 -all", 1},
+		{"v=spf1 ptr -all", 1},
+		{"v=spf1 ptr:example.net -all", 1},
+		{"v=spf1 exists:%{ir}.sbl.example.org -all", 1},
+		{"v=spf1 redirect=_spf.example.net", 1},
+		// exp= is a modifier but §4.6.4 explicitly excludes it.
+		{"v=spf1 -all exp=explain.example.com", 0},
+		// Qualifier prefixes must be stripped before matching.
+		{"v=spf1 +include:a.net ~include:b.net ?include:c.net -include:d.net -all", 4},
+		// Tokens that merely START with a counted name must not false-match.
+		{"v=spf1 all", 0},
+		{"v=spf1 +all", 0},
+		// Mixed record at exactly the cap of 10.
+		{"v=spf1 include:a.net include:b.net include:c.net include:d.net include:e.net include:f.net include:g.net include:h.net include:i.net include:j.net -all", 10},
+	}
+	for _, c := range cases {
+		if got := spfQueryingMechanisms(c.record); got != c.want {
+			t.Errorf("spfQueryingMechanisms(%q) = %d, want %d", c.record, got, c.want)
+		}
+	}
+}
+
+// spfMultiTXTDNSServer spins up a local UDP DNS server whose TXT zone is
+// driven by a map of domain → SPF record. A query for a domain in the map
+// returns that record; any other name returns NOERROR with no answer
+// (exists, no SPF policy → recursion terminates). It is the lookup-limit
+// counterpart to spfDNSServer, which models only one apex + one NXDOMAIN.
+func spfMultiTXTDNSServer(t *testing.T, txt map[string]string) (string, func()) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+
+			q := req.Question[0]
+			name := strings.TrimSuffix(q.Name, ".")
+
+			if q.Qtype == dns.TypeTXT {
+				if record, ok := txt[name]; ok {
+					resp.Answer = []dns.RR{&dns.TXT{
+						Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 300},
+						Txt: []string{record},
+					}}
+				}
+				// Otherwise NOERROR/no-answer → exists, no SPF policy.
+			}
+			// A/CNAME queries return NOERROR/no-answer (exist) so the dangling
+			// traversal finds nothing claimable — the lookup-limit sub-case is
+			// the only one exercised by these fixtures.
+
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	return pc.LocalAddr().String(), func() { pc.Close() }
+}
+
+// TestSPF_DNSLookupLimitPotential drives the full SPF detector against a
+// record whose recursed evaluation requires more than the RFC 7208 §4.6.4 cap
+// of ten DNS lookups: the apex publishes 8 include:s and one of them adds 4
+// more mechanisms downstream, for a total of 12 DNS-querying terms. The
+// detector must emit exactly one POTENTIAL VectorSPF finding whose SPFLookups
+// field carries the offending count, keyed on the target itself, with an
+// evidence string that names the §4.6.4 cap.
+func TestSPF_DNSLookupLimitPotential(t *testing.T) {
+	const target = "permerror.example.com"
+
+	// 8 includes at the apex + the heavy one contributes 4 more (1 include + 1
+	// a + 1 mx + 1 redirect) = 12 total. The heavy include's redirect target's
+	// record adds nothing further (NOERROR + no SPF policy → recursion stops),
+	// so 12 is the deterministic count under spfDNSLookups.
+	apex := "v=spf1 include:a.net include:b.net include:c.net include:d.net " +
+		"include:e.net include:f.net include:g.net include:heavy.net -all"
+	heavy := "v=spf1 include:nested.net a:host.net mx:smtp.net redirect=fallback.net"
+
+	txt := map[string]string{
+		target:      apex,
+		"heavy.net": heavy,
+	}
+	addr, cleanup := spfMultiTXTDNSServer(t, txt)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+
+	// Filter to the lookup-limit sub-case (SPFLookups > 0). Other sub-cases
+	// (permissive/dangling) are not exercised by this fixture so the slice
+	// should contain exactly one finding.
+	var limits []finding.Finding
+	for _, f := range findings {
+		if f.SPFLookups > 0 {
+			limits = append(limits, f)
+		}
+	}
+	if len(limits) != 1 {
+		t.Fatalf("expected exactly 1 lookup-limit finding, got %d (all findings: %+v)", len(limits), findings)
+	}
+	f := limits[0]
+	if f.Vector != finding.VectorSPF {
+		t.Errorf("vector: got %q, want spf", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("confidence: got %q, want POTENTIAL", f.Confidence)
+	}
+	if f.SPFLookups != 12 {
+		t.Errorf("spf_lookups: got %d, want 12", f.SPFLookups)
+	}
+	if f.Subdomain != target {
+		t.Errorf("subdomain: got %q, want %q (lookup-limit findings key on the target)", f.Subdomain, target)
+	}
+	if f.SPFInclude != "" || f.SPFAll != "" {
+		t.Errorf("lookup-limit finding must not set SPFInclude/SPFAll: %+v", f)
+	}
+	if !strings.Contains(f.Evidence, "§4.6.4") || !strings.Contains(f.Evidence, "permerror") {
+		t.Errorf("evidence: got %q, want it to cite §4.6.4 and permerror", f.Evidence)
+	}
+}
+
+// TestSPF_DNSLookupAtCapNoFinding verifies that a record whose recursed
+// evaluation totals exactly ten lookups (the §4.6.4 cap) yields no
+// lookup-limit finding. The cap is "MUST not exceed 10", so 10 is compliant.
+func TestSPF_DNSLookupAtCapNoFinding(t *testing.T) {
+	const target = "atcap.example.com"
+	// Exactly 10 includes — at the cap, not over.
+	record := "v=spf1 include:a.net include:b.net include:c.net include:d.net " +
+		"include:e.net include:f.net include:g.net include:h.net include:i.net " +
+		"include:j.net -all"
+
+	txt := map[string]string{target: record}
+	addr, cleanup := spfMultiTXTDNSServer(t, txt)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	for _, f := range findings {
+		if f.SPFLookups > 0 {
+			t.Errorf("expected no lookup-limit finding at exactly the cap, got: %+v", f)
+		}
+	}
+}
+
+// TestSPF_DNSLookupBelowCapNoFinding verifies that a small record (well under
+// the cap) yields no lookup-limit finding. This is the common-case regression
+// guard: the vast majority of real SPF records are 3-5 lookups and must not
+// false-positive.
+func TestSPF_DNSLookupBelowCapNoFinding(t *testing.T) {
+	const target = "belowcap.example.com"
+	record := "v=spf1 include:_spf.google.com include:mail.example.net a:host.net -all"
+
+	txt := map[string]string{target: record}
+	addr, cleanup := spfMultiTXTDNSServer(t, txt)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	for _, f := range findings {
+		if f.SPFLookups > 0 {
+			t.Errorf("expected no lookup-limit finding for 3-lookup record, got: %+v", f)
+		}
+	}
+}
+
+// TestSPF_DNSLookupLimitCycleSafe confirms the lookup counter terminates and
+// produces a deterministic count on a cyclic include graph (A → B → A). The
+// per-call visited map short-circuits the cycle so the recursion does not
+// stack-overflow; the count is the lookups of each unique policy reached.
+func TestSPF_DNSLookupLimitCycleSafe(t *testing.T) {
+	const target = "cycle.example.com"
+	// Each policy carries 6 includes; A includes B, B includes A. Once A is
+	// visited from B the recursion stops, so the count is 6 (A) + 6 (B) = 12
+	// (over the cap), without ever recursing infinitely.
+	apex := "v=spf1 include:b.net include:p1.net include:p2.net include:p3.net include:p4.net include:p5.net -all"
+	b := "v=spf1 include:" + target + " include:q1.net include:q2.net include:q3.net include:q4.net include:q5.net -all"
+
+	txt := map[string]string{
+		target:  apex,
+		"b.net": b,
+	}
+	addr, cleanup := spfMultiTXTDNSServer(t, txt)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	var saw *finding.Finding
+	for i := range findings {
+		if findings[i].SPFLookups > 0 {
+			saw = &findings[i]
+			break
+		}
+	}
+	if saw == nil {
+		t.Fatalf("expected a lookup-limit finding, got none (all findings: %+v)", findings)
+	}
+	if saw.SPFLookups != 12 {
+		t.Errorf("spf_lookups: got %d, want 12 (cycle truncated by visited map)", saw.SPFLookups)
+	}
+}
+
 // ---- DKIM weak inline key sub-vector ---------------------------------------
 
 // Pre-generated RSA public keys (base64 DER SubjectPublicKeyInfo, the RFC 6376

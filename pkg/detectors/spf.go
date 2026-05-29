@@ -3,6 +3,7 @@ package detectors
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/bugsyhewitt/graverobber/pkg/finding"
@@ -13,8 +14,17 @@ import (
 // lookups at 10; the build step should enforce that limit here.
 const maxSPFDepth = 10
 
-// SPF detects two classes of SPF weakness on a domain: a dangling reference
-// (the SubdoMailing takeover) and a permissive "all" mechanism.
+// maxSPFLookups is the RFC 7208 §4.6.4 cap on DNS-querying mechanisms and
+// modifiers across an SPF evaluation. include, a, mx, ptr, exists, and
+// redirect= each count as one DNS-querying term; ip4, ip6, exp, all, and the
+// version tag do not. A record whose total exceeds 10 MUST produce a
+// "permerror" — every SPF-checking receiver hard-fails the check, which
+// (under DMARC alignment) leaves the domain spoofable by omission.
+const maxSPFLookups = 10
+
+// SPF detects three classes of SPF weakness on a domain: a dangling reference
+// (the SubdoMailing takeover), a permissive "all" mechanism, and a record that
+// exceeds the RFC 7208 §4.6.4 DNS-lookup cap (a "permerror"-by-design policy).
 //
 // Dangling-reference sub-case. Four SPF directives reference an external
 // domain and are therefore equally exploitable when that domain is unregistered:
@@ -57,6 +67,16 @@ const maxSPFDepth = 10
 // offending token is carried in SPFAll and the finding is keyed on the target
 // itself (not an external domain), so it is emitted once per record.
 //
+// Lookup-limit sub-case. RFC 7208 §4.6.4 caps an SPF evaluation at ten
+// DNS-querying mechanisms and modifiers — include, a, mx, ptr, exists, and
+// redirect= each count as one; ip4, ip6, exp, all, and the version tag do not.
+// A record whose total (across the apex policy and every recursed include/
+// redirect target) exceeds ten MUST yield a "permerror" — every conforming
+// SPF receiver hard-fails the check, which under DMARC alignment leaves the
+// domain spoofable by omission. This is the SPF analog of the DMARC p=none
+// weak-policy sub-case: a present-but-broken email-auth record. The offending
+// count is carried in SPFLookups and the finding is keyed on the target.
+//
 // Algorithm:
 //  1. Resolve TXT records (resolver.TXT) and extract the SPF policy.
 //  2. If the record's all mechanism qualifies as Pass, emit a Potential
@@ -64,6 +84,9 @@ const maxSPFDepth = 10
 //  3. Parse include: mechanisms and the redirect= modifier, recursing up to
 //     maxSPFDepth; for each referenced domain that is NXDOMAIN (claimable), emit
 //     a Potential dangling finding.
+//  4. Walk the recursed policy graph and tally every DNS-querying mechanism
+//     and modifier; if the total exceeds maxSPFLookups, emit a Potential
+//     lookup-limit finding keyed on the target.
 func SPF(ctx context.Context, target string, r *resolver.Resolver) ([]finding.Finding, error) {
 	txts, err := r.TXT(ctx, target)
 	if err != nil || len(txts) == 0 {
@@ -94,7 +117,95 @@ func SPF(ctx context.Context, target string, r *resolver.Resolver) ([]finding.Fi
 	visited := map[string]bool{target: true}
 	dangling, _ := spfIncludes(ctx, spfRecord, r, visited, 0)
 	findings = append(findings, dangling...)
+
+	// Lookup-limit sub-case: tally every DNS-querying mechanism and modifier
+	// across the recursed policy graph. Each include/redirect target whose
+	// downstream policy is reachable contributes its own mechanism count; an
+	// unreachable target (NXDOMAIN, SERVFAIL, missing TXT) still contributes the
+	// single lookup the apex spent on it. Counted independently of the dangling
+	// traversal so neither sub-case influences the other.
+	countVisited := map[string]bool{target: true}
+	if total := spfDNSLookups(ctx, spfRecord, r, countVisited, 0); total > maxSPFLookups {
+		findings = append(findings, finding.Finding{
+			Subdomain:  target,
+			Vector:     finding.VectorSPF,
+			Confidence: finding.Potential,
+			SPFLookups: total,
+			Evidence: fmt.Sprintf(
+				"SPF evaluation requires %d DNS-querying mechanisms (RFC 7208 §4.6.4 caps at %d — receivers return permerror; SPF check hard-fails)",
+				total, maxSPFLookups),
+		})
+	}
 	return findings, nil
+}
+
+// spfQueryingMechanisms counts the DNS-querying mechanisms and modifiers in a
+// single SPF record per RFC 7208 §4.6.4: include, a, mx, ptr, exists, and
+// redirect= each count as one lookup; ip4, ip6, exp, all, and the version tag
+// do not. Both the bare and ":domain"/"=domain" forms of a/mx/include/redirect
+// count, as do a/mx with only a "/cidr" dual-CIDR suffix. Qualifier prefixes
+// ("+", "-", "~", "?") on mechanisms are stripped before matching.
+func spfQueryingMechanisms(record string) int {
+	count := 0
+	for _, field := range strings.Fields(record) {
+		// redirect= is a modifier; it never carries a qualifier prefix.
+		if _, ok := strings.CutPrefix(field, "redirect="); ok {
+			count++
+			continue
+		}
+		// exp= is a modifier but is NOT counted (§4.6.4 explicitly excludes it).
+		// Strip qualifier prefixes before matching mechanism names.
+		mech := strings.TrimLeft(field, "+-~?")
+		// Match each DNS-querying mechanism by name, allowing the optional
+		// ":<argument>" or "/<cidr>" suffix that a, mx, ptr, and include may
+		// carry. The trailing-byte check guards against false matches on tokens
+		// that merely start with these short prefixes (e.g. "all" vs "a").
+		switch {
+		case mech == "a", strings.HasPrefix(mech, "a:"), strings.HasPrefix(mech, "a/"):
+			count++
+		case mech == "mx", strings.HasPrefix(mech, "mx:"), strings.HasPrefix(mech, "mx/"):
+			count++
+		case mech == "ptr", strings.HasPrefix(mech, "ptr:"):
+			count++
+		case strings.HasPrefix(mech, "include:"):
+			count++
+		case strings.HasPrefix(mech, "exists:"):
+			count++
+		}
+	}
+	return count
+}
+
+// spfDNSLookups walks the SPF policy graph rooted at record and returns the
+// total number of DNS-querying mechanisms and modifiers per RFC 7208 §4.6.4.
+// Each include:/redirect= target's downstream policy is recursed into when its
+// TXT is reachable; an unreachable include/redirect target still contributes
+// the one lookup the apex spent on it (already counted in record). Cycles and
+// re-encountered domains are short-circuited via visited; bounded by
+// maxSPFDepth as a hard recursion guard, mirroring the dangling traversal.
+func spfDNSLookups(ctx context.Context, record string, r *resolver.Resolver, visited map[string]bool, depth int) int {
+	if depth >= maxSPFDepth {
+		return 0
+	}
+	total := spfQueryingMechanisms(record)
+	for _, ref := range spfReferences(record) {
+		if !ref.recursable() {
+			continue
+		}
+		domain := ref.domain
+		if domain == "" || visited[domain] {
+			continue
+		}
+		visited[domain] = true
+		txts, err := r.TXT(ctx, domain)
+		if err != nil || len(txts) == 0 {
+			continue
+		}
+		if included := extractSPF(txts); included != "" {
+			total += spfDNSLookups(ctx, included, r, visited, depth+1)
+		}
+	}
+	return total
 }
 
 // spfPermissiveAll reports the offending "all" mechanism token when an SPF

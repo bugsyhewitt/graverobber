@@ -105,6 +105,8 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 			detail = fmt.Sprintf("spf include:%s", f.SPFInclude)
 		case f.SPFAll != "":
 			detail = fmt.Sprintf("spf %s (permissive — any host)", f.SPFAll)
+		case f.SPFLookups > 0:
+			detail = fmt.Sprintf("spf %d DNS lookups (>10 — permerror, SPF hard-fails)", f.SPFLookups)
 		}
 	case finding.VectorNS:
 		if len(f.Nameservers) > 0 {
