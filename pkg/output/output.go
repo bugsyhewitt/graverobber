@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/bugsyhewitt/graverobber/pkg/finding"
@@ -146,6 +148,8 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		detail = fmt.Sprintf("mta-sts policy host %s NXDOMAIN (dangling -> %s)", f.Service, f.CNAME)
 	case finding.VectorBIMI:
 		detail = fmt.Sprintf("bimi asset host %s NXDOMAIN (dangling brand logo/VMC)", f.BIMIURIHost)
+	case finding.VectorDNSSEC:
+		detail = fmt.Sprintf("dnssec orphaned DS %s (parent DS, no child DNSKEY — SERVFAIL outage)", formatKeyTags(f.DSKeyTags))
 	}
 
 	_, err := fmt.Fprintf(t.w, "[%s] [%s] %s  %s\n",
@@ -155,6 +159,24 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 
 // Close is a no-op; the underlying io.Writer is owned by the caller.
 func (t *TerminalWriter) Close() error { return nil }
+
+// formatKeyTags renders DNSSEC DS key tags as a "key tag N" / "key tags A, B"
+// phrase shared by the terminal, CSV, and SARIF renderers so the wording cannot
+// drift between output formats. An empty slice yields "key tag(s) (none)".
+func formatKeyTags(tags []uint16) string {
+	if len(tags) == 0 {
+		return "key tag(s) (none)"
+	}
+	parts := make([]string, len(tags))
+	for i, t := range tags {
+		parts[i] = strconv.Itoa(int(t))
+	}
+	label := "key tag"
+	if len(tags) > 1 {
+		label = "key tags"
+	}
+	return label + " " + strings.Join(parts, ", ")
+}
 
 // compile-time interface checks.
 var (

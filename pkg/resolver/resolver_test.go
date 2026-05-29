@@ -846,3 +846,141 @@ func TestTLSA_ZeroOnNXDOMAIN(t *testing.T) {
 		t.Errorf("expected 0 records on NXDOMAIN, got %d", count)
 	}
 }
+
+// dnssecTestServer starts a UDP DNS server that answers DS queries with the
+// given key tags and DNSKEY queries with the given rcode/answer flag. It is the
+// shared fixture for the DSKeyTags / HasDNSKEY tests.
+func dnssecTestServer(t *testing.T, dsKeyTags []uint16, dnskeyRcode int, dnskeyPresent bool) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { pc.Close() })
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			q := req.Question[0]
+			switch q.Qtype {
+			case dns.TypeDS:
+				for _, tag := range dsKeyTags {
+					resp.Answer = append(resp.Answer, &dns.DS{
+						Hdr:        dns.RR_Header{Name: q.Name, Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600},
+						KeyTag:     tag,
+						Algorithm:  13,
+						DigestType: 2,
+						Digest:     "00",
+					})
+				}
+			case dns.TypeDNSKEY:
+				resp.Rcode = dnskeyRcode
+				if dnskeyPresent {
+					resp.Answer = append(resp.Answer, &dns.DNSKEY{
+						Hdr:   dns.RR_Header{Name: q.Name, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+						Flags: 257, Protocol: 3, Algorithm: 13, PublicKey: "AwEAAa==",
+					})
+				}
+			}
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+	return pc.LocalAddr().String()
+}
+
+// TestDSKeyTags_ReturnsTags verifies DSKeyTags extracts the key tags of the
+// parent's DS records.
+func TestDSKeyTags_ReturnsTags(t *testing.T) {
+	addr := dnssecTestServer(t, []uint16{1111, 2222}, dns.RcodeSuccess, false)
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	tags, err := r.DSKeyTags(ctx, "signed.example.com")
+	if err != nil {
+		t.Fatalf("DSKeyTags: %v", err)
+	}
+	if len(tags) != 2 || tags[0] != 1111 || tags[1] != 2222 {
+		t.Errorf("DSKeyTags = %v, want [1111 2222]", tags)
+	}
+}
+
+// TestDSKeyTags_EmptyWhenNoDS verifies DSKeyTags returns an empty slice (no
+// error) for an unsigned delegation with no DS records.
+func TestDSKeyTags_EmptyWhenNoDS(t *testing.T) {
+	addr := dnssecTestServer(t, nil, dns.RcodeSuccess, false)
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	tags, err := r.DSKeyTags(ctx, "insecure.example.com")
+	if err != nil {
+		t.Fatalf("DSKeyTags: %v", err)
+	}
+	if len(tags) != 0 {
+		t.Errorf("expected no DS key tags for an unsigned delegation, got %v", tags)
+	}
+}
+
+// TestHasDNSKEY_Present verifies HasDNSKEY reports true when the zone publishes a
+// DNSKEY.
+func TestHasDNSKEY_Present(t *testing.T) {
+	addr := dnssecTestServer(t, nil, dns.RcodeSuccess, true)
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	found, err := r.HasDNSKEY(ctx, "signed.example.com")
+	if err != nil {
+		t.Fatalf("HasDNSKEY: %v", err)
+	}
+	if !found {
+		t.Error("expected HasDNSKEY=true for a signed zone")
+	}
+}
+
+// TestHasDNSKEY_AbsentNoError verifies HasDNSKEY reports false with no error when
+// the zone exists but publishes no DNSKEY (the orphan condition).
+func TestHasDNSKEY_AbsentNoError(t *testing.T) {
+	addr := dnssecTestServer(t, nil, dns.RcodeSuccess, false)
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	found, err := r.HasDNSKEY(ctx, "unsigned.example.com")
+	if err != nil {
+		t.Fatalf("HasDNSKEY (absent) should not error: %v", err)
+	}
+	if found {
+		t.Error("expected HasDNSKEY=false when no DNSKEY is published")
+	}
+}
+
+// TestHasDNSKEY_ServfailIsZoneDeleted verifies a SERVFAIL on the DNSKEY query —
+// a validating resolver's response to an already-broken chain — maps to
+// ErrZoneDeleted so the detector treats it as a confirmed break.
+func TestHasDNSKEY_ServfailIsZoneDeleted(t *testing.T) {
+	addr := dnssecTestServer(t, nil, dns.RcodeServerFailure, false)
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	found, err := r.HasDNSKEY(ctx, "broken.example.com")
+	if found {
+		t.Error("SERVFAIL must not report a key present")
+	}
+	if !errors.Is(err, ErrZoneDeleted) {
+		t.Errorf("expected ErrZoneDeleted on SERVFAIL, got %v", err)
+	}
+}

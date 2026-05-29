@@ -171,6 +171,11 @@ var vectorRuleText = map[finding.Vector]struct {
 		"A BIMI record's logo or VMC URL points at a host that is NXDOMAIN.",
 		"A domain advertises BIMI (Brand Indicators for Message Identification) via a \"v=BIMI1\" TXT record whose l= (logo) or a= (VMC certificate) URL points at a host that is NXDOMAIN. BIMI-aware mail clients display the logo beside DMARC-passing mail from the domain as a visual mark of authenticity; an attacker who reclaims the dangling asset host can serve a forged brand logo (and, where the VMC host is the reclaimed one, a forged VMC), lending a spoofing campaign the exact trust signal BIMI exists to confer — a brand-impersonation surface.",
 	},
+	finding.VectorDNSSEC: {
+		"Orphaned DNSSEC DS record (broken chain of trust)",
+		"The parent zone publishes a DS record but the domain has no DNSKEY.",
+		"The domain's parent zone publishes a DS (Delegation Signer, RFC 4034) record — committing every DNSSEC-validating resolver to build an authenticated chain of trust into the domain's zone — but the domain itself publishes no DNSKEY, so the chain cannot be completed. DNSSEC validation fails closed: every validating resolver (the default at Google Public DNS, Cloudflare 1.1.1.1, Quad9, and most ISPs) returns SERVFAIL for the entire zone, taking the domain and all its services (web, mail, APIs) offline for a large fraction of the internet while it resolves normally on non-validating resolvers. It is typically caused by disabling DNSSEC at the child or migrating DNS providers without first removing the DS at the registrar — a self-inflicted denial of service repaired by removing the orphaned DS or re-signing the zone.",
+	},
 }
 
 // ruleForVector builds the SARIF rule descriptor for a vector. Unknown vectors
@@ -297,6 +302,8 @@ func sarifMessage(f finding.Finding) string {
 		detail = fmt.Sprintf("MTA-STS policy host %s is NXDOMAIN (dangling — reclaimable target %s)", f.Service, f.CNAME)
 	case finding.VectorBIMI:
 		detail = fmt.Sprintf("BIMI asset host %s is NXDOMAIN (dangling — reclaimable to serve a forged brand logo/VMC)", f.BIMIURIHost)
+	case finding.VectorDNSSEC:
+		detail = fmt.Sprintf("orphaned DS (%s) at the parent with no DNSKEY in %s — DNSSEC chain broken, validating resolvers SERVFAIL the whole zone", formatKeyTags(f.DSKeyTags), f.Subdomain)
 	}
 	msg := fmt.Sprintf("[%s] %s takeover candidate on %s", f.Confidence, f.Vector, f.Subdomain)
 	if detail != "" {

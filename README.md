@@ -1,14 +1,14 @@
 # graverobber
 
-**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer, CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, and dangling BIMI asset hosts.**
+**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer, CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, dangling BIMI asset hosts, and orphaned DNSSEC DS records.**
 
 > Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, DKIM,
 > and DMARC takeover detection plus unauthenticated AXFR zone-transfer discovery,
-> CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, and dangling BIMI asset hosts in one pipeline-friendly Go binary.
+> CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, dangling BIMI asset hosts, and orphaned DNSSEC DS records in one pipeline-friendly Go binary.
 
 `graverobber` is the only maintained Go binary that covers **CNAME**, **NS**,
 **SPF**, **MX**, **DKIM**, and **DMARC** takeover vectors plus **AXFR**
-zone-transfer, **CAA** misconfiguration, dangling **DANE TLSA** pins, dangling **MTA-STS** policy hosts, and dangling **BIMI** asset hosts in a single tool. It is a static binary with no
+zone-transfer, **CAA** misconfiguration, dangling **DANE TLSA** pins, dangling **MTA-STS** policy hosts, dangling **BIMI** asset hosts, and orphaned **DNSSEC DS** records in a single tool. It is a static binary with no
 runtime, reads targets from stdin/file/flag, streams JSONL, and uses the
 exit-code conventions of the `httpx`/`subfinder` family so it drops straight into
 a recon pipeline.
@@ -30,6 +30,7 @@ a recon pipeline.
 | TLSA  | A DANE `TLSA` pin at `_25._tcp.<mxhost>` covers an MX host that is NXDOMAIN — a dangling, DNSSEC-authenticated pin | Hard-fails inbound mail from DANE senders; reclaimable mail host → DANE-trusted interception (RFC 7672) |
 | MTA-STS | An MTA-STS policy is advertised (`v=STSv1` TXT at `_mta-sts.<domain>`) but the policy host `mta-sts.<domain>` is NXDOMAIN and re-claimable | Reclaimed policy host serves a forged policy (`mode: none` disables TLS enforcement, or an attacker `mx:` list redirects mail) → TLS downgrade / mail interception (RFC 8461) |
 | BIMI | A BIMI record (`v=BIMI1` TXT at `default._bimi.<domain>`) names a logo (`l=`) or VMC (`a=`) URL whose host is NXDOMAIN and re-claimable | Reclaimed asset host serves a forged brand logo/VMC, displayed beside DMARC-passing mail → brand-impersonation phishing (BIMI spec) |
+| DNSSEC | The parent zone publishes a `DS` (Delegation Signer) record but the domain has **no `DNSKEY`** — an orphaned DS that breaks the chain of trust | Every validating resolver (Google, Cloudflare, Quad9, most ISPs) `SERVFAIL`s the whole zone → self-inflicted outage; common after disabling DNSSEC or migrating DNS providers without removing the DS (RFC 4034) |
 
 Most scanners cover CNAME only. NS, SPF, MX, DKIM, and DMARC takeover are live,
 actively-exploited vectors that almost no Go tool handles. Together SPF, DKIM,
@@ -46,6 +47,15 @@ advertises MTA-STS but leaves its `mta-sts.<domain>` policy host dangling lets a
 attacker who reclaims that host serve a forged policy — `mode: none` to disable
 TLS enforcement outright, or an attacker-controlled `mx:` list to steer inbound
 mail — defeating the active-downgrade protection MTA-STS is meant to provide.
+DNSSEC widens the scope from takeover to availability: a domain whose parent
+still publishes a `DS` record after the child has dropped its `DNSKEY` (a DNSSEC
+disable, or a provider migration that left the registrar's DS behind) presents an
+orphaned DS — the chain of trust breaks at the last link and every
+DNSSEC-validating resolver returns `SERVFAIL` for the entire zone, taking the
+domain dark for the large and growing share of the internet that validates while
+it resolves normally on non-validating resolvers, which makes the outage
+maddening to diagnose. It is not attacker-claimable, but it is a high-severity,
+purely-DNS-detectable misconfiguration an operator urgently needs surfaced.
 
 ---
 
@@ -89,7 +99,7 @@ graverobber -l subs.txt --fingerprints ~/private.json
 graverobber -l subs.txt --offline
 
 # Skip vectors
-graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa --no-mtasts --no-bimi
+graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa --no-mtasts --no-bimi --no-dnssec
 
 # Probe a custom set of DKIM selectors instead of the built-in ESP defaults
 graverobber -l subs.txt --selectors default,google,s1,s2,k1
@@ -244,6 +254,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-tlsa` | false | Skip TLSA dangling-DANE-pin checks |
 | `--no-mtasts` | false | Skip MTA-STS dangling-policy-host checks |
 | `--no-bimi` | false | Skip BIMI dangling-asset-host checks |
+| `--no-dnssec` | false | Skip DNSSEC orphaned-DS (broken chain-of-trust) checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
 | `--offline` | false | Cached/embedded fingerprints only, no network |
@@ -570,6 +581,51 @@ asset hosts all resolve, is the healthy case and is intentionally **not** flagge
 The `a=self` and empty-value forms name no remote host and are likewise never
 flagged — only an advertised-but-orphaned asset host is reported.
 
+### Orphaned DNSSEC DS record (`--no-dnssec`)
+
+DNSSEC secures a delegation with two halves: the child zone signs its records and
+publishes a `DNSKEY`, and the **parent** zone publishes a `DS` (Delegation Signer)
+record — a hash of one of the child's keys — that tells every validating resolver
+"this delegation is secure, verify it." The `DS` is what *turns on* validation for
+the child:
+
+```
+example.com.        DS      12345 13 2 AB...        ← published by the parent (.com)
+example.com.        DNSKEY  257 3 13 ...            ← published by the child
+```
+
+If the operator turns DNSSEC **off** at the child (stops signing, drops the
+`DNSKEY`) — or migrates to a new DNS provider that generates fresh keys — but
+never removes the `DS` at the registrar, the parent still asserts "this delegation
+is secure" while the child can no longer prove it. The chain of trust breaks at
+the last link. This is an **orphaned DS**, and the consequence is severe and
+internet-wide:
+
+- Every DNSSEC-**validating** resolver returns `SERVFAIL` for the **entire zone**,
+  not one record — DNSSEC fails closed.
+- Validation is the default at Google Public DNS (`8.8.8.8`), Cloudflare
+  (`1.1.1.1`), Quad9 (`9.9.9.9`), and a large, growing share of ISP resolvers, so
+  the domain and all its services (web, mail, APIs) go dark for a substantial
+  fraction of the internet **while resolving normally** for anyone on a
+  non-validating resolver — which makes it maddening to diagnose.
+
+It is one of the most common production DNSSEC outages and has taken government
+and enterprise domains offline for hours. Unlike the takeover vectors, an orphaned
+DS is not directly attacker-claimable — its harm is availability, not interception
+— but it is exactly the dangling-delegation family graverobber specialises in,
+applied to the DNSSEC chain-of-trust plane, and it is a finding an operator
+urgently needs surfaced.
+
+graverobber queries `DS` for the target (answered by the parent). No `DS` means an
+unsigned delegation — the common default, nothing to orphan — and is never
+flagged. If a `DS` is present, graverobber queries `DNSKEY` (answered by the
+child): a key present is the healthy signed case and is not flagged; **no `DNSKEY`
+— or a `SERVFAIL` on the `DNSKEY` query, which a validating resolver returns
+precisely because the chain is already broken** — is reported as a `POTENTIAL`
+`dnssec` finding keyed on the target, carrying the orphaned `DS` key tags in
+`ds_key_tags` so you know exactly which registrar records to remove (or re-sign
+the zone to match).
+
 ---
 
 ## Confidence model
@@ -598,6 +654,7 @@ JSONL — one finding per line:
 {"subdomain":"example.com","vector":"tlsa","confidence":"POTENTIAL","mx_hosts":["mx.deleted-vendor.invalid"],"tlsa_name":"_25._tcp.mx.deleted-vendor.invalid","evidence":"DANE TLSA pin published at _25._tcp.mx.deleted-vendor.invalid but MX host mx.deleted-vendor.invalid is NXDOMAIN (dangling DANE pin — hard-fails inbound mail; reclaimable for DANE-trusted interception)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"mtasts","service":"mta-sts.example.com","confidence":"POTENTIAL","cname":"policy.deleted-vendor.invalid","evidence":"MTA-STS policy advertised at _mta-sts.example.com but policy host mta-sts.example.com is NXDOMAIN (dangling MTA-STS host — reclaimable to serve a forged policy that disables TLS enforcement or redirects mail)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"bimi","service":"default._bimi.example.com","confidence":"POTENTIAL","bimi_uri_host":"images.deleted-vendor.invalid","evidence":"BIMI record at default._bimi.example.com l= asset host images.deleted-vendor.invalid is NXDOMAIN (dangling BIMI asset host — reclaimable to serve a forged brand logo/VMC beside DMARC-passing mail)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"example.com","vector":"dnssec","confidence":"POTENTIAL","ds_key_tags":[12345],"evidence":"parent zone publishes DS record(s) (key tag(s) 12345) but example.com has no DNSKEY — orphaned DS: DNSSEC-validating resolvers (Google, Cloudflare, Quad9, most ISPs) return SERVFAIL for the whole zone (self-inflicted outage; remove the DS at the registrar or re-sign the zone)","timestamp":"2026-05-28T12:00:00Z"}
 ```
 
 Without `--json`, findings render as one coloured human-readable line per
@@ -607,14 +664,15 @@ and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
 failed nameservers (`ns`), the dangling
 mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation or
 weak inline RSA key size (`dkim`), the claimable `rua`/`ruf` report domain
-(`dmarc`), or the leaking
-nameserver and leaked-host count (`axfr`). ANSI colour is emitted only to a TTY;
+(`dmarc`), the leaking
+nameserver and leaked-host count (`axfr`), or the orphaned `DS` key tags
+(`dnssec`). ANSI colour is emitted only to a TTY;
 piped or file output is plain text.
 
 When the scan finishes, the human-readable mode closes with a triage summary on
 stderr: the total count, then a breakdown by confidence tier (strongest first)
 and by vector (pipeline order). The by-vector breakdown covers every vector the
-scanner can emit (`cname`, `ns`, `spf`, `mx`, `dkim`, `dmarc`, `axfr`, `caa`, `tlsa`, `mtasts`, `bimi`), so
+scanner can emit (`cname`, `ns`, `spf`, `mx`, `dkim`, `dmarc`, `axfr`, `caa`, `tlsa`, `mtasts`, `bimi`, `dnssec`), so
 the per-vector counts always reconcile with the total. Only the tiers and vectors
 that actually occurred are listed, so a single-vector scan stays uncluttered:
 

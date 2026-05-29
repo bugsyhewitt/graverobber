@@ -452,6 +452,77 @@ func (r *Resolver) TLSA(ctx context.Context, host string) (count int, err error)
 	return count, nil
 }
 
+// DSKeyTags returns the key tags of the DS (Delegation Signer, RFC 4034)
+// records published for host in its PARENT zone. A non-empty result means the
+// parent has signed a delegation to host: every DNSSEC-validating resolver is
+// now committed to building an authenticated chain into host's zone.
+//
+// An empty slice with a nil error means host has no DS record — it is an
+// unsigned (insecure) delegation, the common default, and nothing to orphan. A
+// non-nil error means the lookup was indeterminate (transport failure, SERVFAIL
+// from the parent) and the caller should emit no finding.
+//
+// The DS query is answered authoritatively by the parent zone, so it is a plain
+// recursive lookup like every other record type; the DO bit is not required to
+// ask for DS records themselves. The key tags are surfaced as the actionable
+// identifier of the orphaned delegation (they name which parent DS records have
+// no matching child key).
+func (r *Resolver) DSKeyTags(ctx context.Context, host string) ([]uint16, error) {
+	resp, err := r.query(ctx, host, dns.TypeDS)
+	if err != nil {
+		return nil, err
+	}
+	// A SERVFAIL on the DS query itself (a broken parent) is indeterminate, not
+	// a verdict: do not infer an orphan from it.
+	if resp.Rcode != dns.RcodeSuccess {
+		return nil, nil
+	}
+	var tags []uint16
+	for _, rr := range resp.Answer {
+		if ds, ok := rr.(*dns.DS); ok {
+			tags = append(tags, ds.KeyTag)
+		}
+	}
+	return tags, nil
+}
+
+// HasDNSKEY reports whether host's own zone publishes any DNSKEY (RFC 4034)
+// record — i.e. whether the zone is DNSSEC-signed. A true result means the child
+// zone has at least one key with which a DS record at the parent could be
+// matched; false means the zone publishes no key at all.
+//
+// found is false with a nil error when the zone exists but publishes no DNSKEY
+// (the orphaned-DS condition when the parent nonetheless has a DS). A non-nil
+// error means the lookup was indeterminate and the caller should emit no
+// finding: in particular a SERVFAIL — which a validating recursive resolver
+// returns for a zone whose DS/DNSKEY chain is already broken — is reported as
+// ErrZoneDeleted so the detector can treat it as a positive break signal rather
+// than mistake it for "no key".
+func (r *Resolver) HasDNSKEY(ctx context.Context, host string) (found bool, err error) {
+	resp, err := r.query(ctx, host, dns.TypeDNSKEY)
+	if err != nil {
+		return false, err
+	}
+	switch resp.Rcode {
+	case dns.RcodeSuccess:
+		for _, rr := range resp.Answer {
+			if _, ok := rr.(*dns.DNSKEY); ok {
+				return true, nil
+			}
+		}
+		return false, nil
+	case dns.RcodeServerFailure:
+		// A validating recursive resolver returns SERVFAIL for a zone whose
+		// DNSSEC chain is already broken (the very orphan we are detecting). Map
+		// it to ErrZoneDeleted so the detector treats it as a confirmed break,
+		// not an indeterminate transport error.
+		return false, ErrZoneDeleted
+	default:
+		// NXDOMAIN/REFUSED/other: indeterminate for the orphan verdict.
+		return false, fmt.Errorf("resolver: DNSKEY query rcode %d", resp.Rcode)
+	}
+}
+
 // soaRetries is the number of UDP attempts before escalating to TCP.
 // Transient SERVFAIL and packet loss are common; retrying reduces false
 // negatives without risking false positives (a real deletion returns

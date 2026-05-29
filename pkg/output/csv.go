@@ -155,6 +155,10 @@ func csvTarget(f finding.Finding) string {
 		// The dangling BIMI asset host (logo/VMC URL host) is the actionable
 		// target the attacker would reclaim.
 		return fmt.Sprintf("%s (NXDOMAIN)", f.BIMIURIHost)
+	case finding.VectorDNSSEC:
+		// The orphaned DS key tags name exactly which registrar records must be
+		// removed (or matched by re-signing) to repair the broken chain.
+		return fmt.Sprintf("orphaned DS %s (no child DNSKEY)", formatKeyTags(f.DSKeyTags))
 	default:
 		return ""
 	}

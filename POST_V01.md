@@ -795,6 +795,82 @@ dependency (uses the existing `miekg/dns` resolver and stdlib `net/url`).
 
 ---
 
+## Rank 19 — DNSSEC orphaned-DS detection (twelfth vector) — ✅ IMPLEMENTED (Phase 2, Rotation 25)
+
+**Status:** Shipped. Rotation 25's directive offered two candidates — a **DMARC
+aggregate report-URI dangling host** check or a **DNSSEC DS-record orphan** check
+— with instructions to assess the codebase first. Assessment found:
+
+- The **DMARC aggregate report-URI dangling host is already shipped.** The DMARC
+  detector (`detectors.DMARC`, Ranks 8 + 15) already resolves every `rua=`/`ruf=`
+  report domain and emits a `POTENTIAL dmarc` finding for any that is NXDOMAIN
+  (the report-interception case, carried in `DMARCURI`). Re-implementing it would
+  duplicate existing coverage, so it was rejected.
+- The **DNSSEC DS-record orphan was not present** anywhere in the codebase (DNSSEC
+  was referenced only as context for the DANE TLSA vector). It is a clean,
+  purely-DNS-detectable, high-severity misconfiguration in exactly the
+  dangling-delegation family the tool specialises in — applied to the DNSSEC
+  chain-of-trust plane — so it was implemented.
+
+An **orphaned DS** is a domain whose **parent** zone publishes a `DS` (Delegation
+Signer, RFC 4034) record — committing every DNSSEC-validating resolver to build an
+authenticated chain of trust into the domain's zone — while the domain's own zone
+publishes **no `DNSKEY`**, so that chain cannot be completed. It is the classic
+outcome of disabling DNSSEC at the child, or migrating DNS providers (which
+generate fresh keys), without first removing the `DS` at the registrar. DNSSEC
+fails closed: every validating resolver (the default at Google `8.8.8.8`,
+Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`, and most ISPs) returns `SERVFAIL` for the
+**entire zone**, taking the domain and all its services dark for a large share of
+the internet while it resolves normally on non-validating resolvers — a
+self-inflicted denial of service and one of the most common production DNSSEC
+outages. Unlike the takeover vectors its harm is availability, not attacker
+interception, but it is a high-severity finding an operator urgently needs
+surfaced.
+
+The detector (`pkg/detectors/dnssec.go`, `detectors.DNSSEC`) queries `DS` for the
+target (answered by the parent). No `DS` → unsigned delegation, the common
+default, nothing to orphan → no finding. With a `DS` present it queries `DNSKEY`
+(answered by the child): a key present is the healthy signed case; **no `DNSKEY` —
+or a `SERVFAIL` on the `DNSKEY` query, which a validating resolver returns
+precisely because the chain is already broken** — yields a `POTENTIAL dnssec`
+finding keyed on the target, carrying the orphaned `DS` key tags (deduplicated and
+ascending-sorted) in the new `DSKeyTags` field so the operator knows exactly which
+registrar records to remove. Two new resolver primitives back it: `DSKeyTags`
+(parent `DS` key tags) and `HasDNSKEY` (child key presence, with `SERVFAIL` mapped
+to `ErrZoneDeleted` so the break is treated as confirmation, not an indeterminate
+error). The detector deliberately does NOT chase a `DS`/`DNSKEY` key-tag mismatch
+(a far rarer, separately-classifiable case): the presence of ANY child key is the
+low-noise, low-false-positive signal that the zone is signed.
+
+Wired end to end: new `finding.VectorDNSSEC` + `DSKeyTags` field; `dnssecVector`
+in the scanner with the `NoDNSSEC` opt-out; `--no-dnssec` CLI flag; rendering in
+the terminal, CSV (`target` column), and SARIF (rule descriptor + message)
+outputs; the vector added to `summaryVectorOrder` and `allEmittableVectors` so the
+by-vector triage summary reconciles (the Rank 17 lesson); and the root command's
+Short/Long descriptions updated. A shared `formatKeyTags` helper in `pkg/output`
+keeps the key-tag wording identical across the three rendered formats.
+
+Guarded by 9 new detector tests (`pkg/detectors/dnssec_test.go`): orphaned DS,
+`SERVFAIL`-is-orphan, healthy signed zone (no finding), unsigned delegation (no
+finding), multi-DS dedup+sort, evidence wording, blank-target safety, the
+vector-constant pin, and the key-tag normaliser. Plus 5 resolver tests
+(`DSKeyTags` returns/empty, `HasDNSKEY` present/absent/SERVFAIL) and a DNSSEC case
+added to the terminal, CSV, and SARIF per-vector output tests. Full suite green,
+`go vet` clean.
+
+**Why this over re-implementing the DMARC report-URI check:** that check already
+exists; the DNSSEC orphan is a genuinely new, exploitable-by-omission, DNS-only
+vector that extends graverobber from the takeover surface into the availability
+surface of the DNS control plane it already owns. New API surface (one vector, one
+field, one flag, two resolver methods), no architectural change.
+
+**Complexity:** Low-Med — one new detector file, two resolver primitives, one
+finding field + vector constant, scanner/CLI/output wiring, 14 new tests. No new
+dependency (uses the existing `miekg/dns` resolver, which already exposes `DS` and
+`DNSKEY` record types).
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -833,3 +909,4 @@ dependency (uses the existing `miekg/dns` resolver and stdlib `net/url`).
 | 16 | CAA misconfiguration (8th vector) ✅ | Low-Med | High (new DNS-security surface, MITM TLS) | Yes (new vector + flag) |
 | 17 | Triage summary by-vector completeness (AXFR/CAA) ✅ | Trivial | High (default-mode correctness) | No |
 | 18 | BIMI dangling-asset-host detection (11th vector) ✅ | Low-Med | High (new email-auth-trust surface, brand-impersonation) | Yes (new vector + field + flag) |
+| 19 | DNSSEC orphaned-DS detection (12th vector) ✅ | Low-Med | High (new availability surface, self-inflicted SERVFAIL outage) | Yes (new vector + field + flag) |
