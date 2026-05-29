@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -959,5 +960,165 @@ func TestDMARC_NoRecordNoFinding(t *testing.T) {
 	}
 	if len(findings) != 0 {
 		t.Errorf("expected no findings when no DMARC record, got %d", len(findings))
+	}
+}
+
+// ---- SPF redirect= modifier ------------------------------------------------
+
+// TestSPFReferences verifies that include: mechanisms and the redirect=
+// modifier are both extracted, in record order, with case-folding and the
+// redirect flag set correctly. Non-referencing mechanisms (ip4, a, mx, all)
+// must be ignored.
+func TestSPFReferences(t *testing.T) {
+	cases := []struct {
+		record string
+		want   []spfReference
+	}{
+		{
+			"v=spf1 include:_spf.example.com -all",
+			[]spfReference{{domain: "_spf.example.com"}},
+		},
+		{
+			"v=spf1 redirect=_spf.example.net",
+			[]spfReference{{domain: "_spf.example.net", redirect: true}},
+		},
+		{
+			// both directives, mixed case, plus ignorable mechanisms
+			"v=spf1 ip4:1.2.3.0/24 include:A.Example.COM a mx redirect=B.Example.NET ~all",
+			[]spfReference{
+				{domain: "a.example.com"},
+				{domain: "b.example.net", redirect: true},
+			},
+		},
+		{
+			// no external references
+			"v=spf1 ip4:10.0.0.0/8 -all",
+			nil,
+		},
+	}
+	for _, c := range cases {
+		got := spfReferences(c.record)
+		if len(got) != len(c.want) {
+			t.Fatalf("spfReferences(%q) = %v, want %v", c.record, got, c.want)
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("spfReferences(%q)[%d] = %+v, want %+v", c.record, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+// spfDNSServer spins up a local UDP DNS server modelling an SPF policy: the
+// target's TXT record carries spfRecord, and nxDomain is NXDOMAIN for both A and
+// CNAME queries (the claimable target). Every other name returns NOERROR with no
+// answer (i.e. it exists with no SPF policy of its own, so recursion stops).
+func spfDNSServer(t *testing.T, target, spfRecord, nxDomain string) (string, func()) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+
+			q := req.Question[0]
+			name := q.Name
+
+			switch {
+			case q.Qtype == dns.TypeTXT && name == dns.Fqdn(target):
+				resp.Answer = []dns.RR{&dns.TXT{
+					Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 300},
+					Txt: []string{spfRecord},
+				}}
+			case name == dns.Fqdn(nxDomain) && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeCNAME):
+				resp.Rcode = dns.RcodeNameError
+			default:
+				// Everything else NOERROR/no-answer → exists, no SPF policy.
+			}
+
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	return pc.LocalAddr().String(), func() { pc.Close() }
+}
+
+// TestSPF_DanglingRedirectPotential drives the full SPF detector: a policy whose
+// redirect= target is NXDOMAIN must yield exactly one Potential VectorSPF
+// finding whose evidence names the redirect= directive (not include:).
+func TestSPF_DanglingRedirectPotential(t *testing.T) {
+	const (
+		target         = "example.com"
+		redirectTarget = "_spf.deleted-vendor.invalid"
+	)
+	record := "v=spf1 redirect=" + redirectTarget
+
+	addr, cleanup := spfDNSServer(t, target, record, redirectTarget)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Vector != finding.VectorSPF {
+		t.Errorf("vector: got %q, want spf", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("confidence: got %q, want POTENTIAL", f.Confidence)
+	}
+	if f.SPFInclude != redirectTarget {
+		t.Errorf("spf_include: got %q, want %q", f.SPFInclude, redirectTarget)
+	}
+	if f.Subdomain != redirectTarget {
+		t.Errorf("subdomain: got %q, want %q", f.Subdomain, redirectTarget)
+	}
+	if !strings.Contains(f.Evidence, "redirect=") {
+		t.Errorf("evidence: got %q, want it to mention redirect=", f.Evidence)
+	}
+}
+
+// TestSPF_LiveRedirectNoFinding verifies that a redirect= target that resolves
+// (exists) produces no finding.
+func TestSPF_LiveRedirectNoFinding(t *testing.T) {
+	const target = "example.com"
+	// The redirect target "live.example.net" is not the server's NXDOMAIN name,
+	// so it returns NOERROR → exists → no finding.
+	record := "v=spf1 redirect=live.example.net"
+
+	addr, cleanup := spfDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings for live redirect target, got %d: %+v", len(findings), findings)
 	}
 }
