@@ -16,8 +16,8 @@ const maxSPFDepth = 10
 // SPF detects two classes of SPF weakness on a domain: a dangling reference
 // (the SubdoMailing takeover) and a permissive "all" mechanism.
 //
-// Dangling-reference sub-case. Two SPF directives reference an external domain's
-// policy and are therefore equally exploitable when that domain is unregistered:
+// Dangling-reference sub-case. Four SPF directives reference an external
+// domain and are therefore equally exploitable when that domain is unregistered:
 //
 //   - include:<domain> — a mechanism (RFC 7208 §5.2) that pulls in another
 //     domain's SPF record; a passing result there contributes to the policy.
@@ -26,10 +26,24 @@ const maxSPFDepth = 10
 //     mechanism matches. A dangling redirect= is arguably higher-impact than a
 //     dangling include: because the redirect target's policy replaces the local
 //     one wholesale.
+//   - a:<domain> — a mechanism (RFC 7208 §5.3) that passes when the sender's IP
+//     matches an A/AAAA record of the named domain. With an explicit domain
+//     argument it authorises that external domain's address records to send mail
+//     as the target.
+//   - mx:<domain> — a mechanism (RFC 7208 §5.4) that passes when the sender's IP
+//     matches an A/AAAA record of one of the named domain's MX hosts. With an
+//     explicit domain argument it authorises that external domain's mail-host
+//     addresses to send as the target.
 //
-// Both yield the SubdoMailing takeover (Guardio Labs, Feb 2024): an attacker who
-// registers the claimable target domain controls the SPF evaluation and can
-// authorise spoofed mail. The claimable domain is carried in SPFInclude.
+// All four yield the SubdoMailing takeover (Guardio Labs, Feb 2024): an attacker
+// who registers the claimable target domain controls the SPF evaluation and can
+// authorise spoofed mail. For a:/mx: the attacker simply points the reclaimed
+// domain's A (or MX) records at their own sending host and every message they
+// send passes SPF for the target. The claimable domain is carried in SPFInclude.
+//
+// Bare a/mx mechanisms with NO ":domain" argument (e.g. "a", "a/24", "mx",
+// "mx//64") reference the TARGET's own A/MX records, not an external domain, so
+// they are not a takeover surface and are intentionally NOT extracted.
 //
 // Permissive-policy sub-case. The "all" mechanism is the catch-all that ends a
 // well-formed SPF record (RFC 7208 §5.1); its qualifier decides the result for
@@ -113,27 +127,78 @@ func extractSPF(txts []string) string {
 // spfReference is a single external domain referenced by an SPF record, tagged
 // with the directive that referenced it so the finding's evidence can name it.
 type spfReference struct {
-	domain   string // lower-cased referenced domain
-	redirect bool   // true for a redirect= modifier, false for an include: mechanism
+	domain    string // lower-cased referenced domain
+	directive string // the directive that referenced it: "include:", "redirect=", "a:", or "mx:"
+}
+
+// recursable reports whether the referenced domain hosts its own SPF policy that
+// should be followed. include: and redirect= name another SPF record and so are
+// recursed; a:/mx: name a host whose ADDRESS records are authorised — they do not
+// pull in a downstream SPF policy, so their dangling check is terminal.
+func (ref spfReference) recursable() bool {
+	return ref.directive == "include:" || ref.directive == "redirect="
 }
 
 // spfReferences extracts the external domains a single SPF record points at via
-// include: mechanisms and the redirect= modifier, in record order. A redirect=
-// modifier may legally appear anywhere in the record but applies only when no
-// mechanism matches; for takeover detection its position is irrelevant — what
-// matters is whether its target is claimable.
+// the include:, a:, and mx: mechanisms and the redirect= modifier, in record
+// order. A redirect= modifier may legally appear anywhere in the record but
+// applies only when no mechanism matches; for takeover detection its position is
+// irrelevant — what matters is whether its target is claimable.
+//
+// For a:/mx: only the explicit-domain form ("a:domain", "mx:domain", optionally
+// with a trailing "/cidr" or "//cidr" dual-CIDR suffix) references an external
+// domain. A bare "a"/"mx" (or "a/24") points at the target's own records and is
+// not a takeover surface, so it is skipped. A mechanism may carry a qualifier
+// prefix ("+", "-", "~", "?"), which is stripped before matching.
 func spfReferences(record string) []spfReference {
 	var refs []spfReference
 	for _, field := range strings.Fields(record) {
-		if domain, ok := strings.CutPrefix(field, "include:"); ok {
-			refs = append(refs, spfReference{domain: normaliseSPFDomain(domain)})
+		// redirect= is a modifier; it never carries a qualifier prefix.
+		if domain, ok := strings.CutPrefix(field, "redirect="); ok {
+			refs = append(refs, spfReference{domain: normaliseSPFDomain(domain), directive: "redirect="})
 			continue
 		}
-		if domain, ok := strings.CutPrefix(field, "redirect="); ok {
-			refs = append(refs, spfReference{domain: normaliseSPFDomain(domain), redirect: true})
+
+		// Mechanisms may be prefixed with a qualifier; strip it before matching.
+		mech := strings.TrimLeft(field, "+-~?")
+
+		if domain, ok := strings.CutPrefix(mech, "include:"); ok {
+			refs = append(refs, spfReference{domain: normaliseSPFDomain(domain), directive: "include:"})
+			continue
+		}
+		if domain, ok := spfDualCIDRDomain(mech, "a:"); ok {
+			refs = append(refs, spfReference{domain: domain, directive: "a:"})
+			continue
+		}
+		if domain, ok := spfDualCIDRDomain(mech, "mx:"); ok {
+			refs = append(refs, spfReference{domain: domain, directive: "mx:"})
 		}
 	}
 	return refs
+}
+
+// spfDualCIDRDomain extracts the external domain from an "a:" or "mx:" mechanism
+// of the form "<prefix>domain", "<prefix>domain/24", or "<prefix>domain//64"
+// (RFC 7208 §5.3/§5.4 dual-CIDR-length syntax). It returns ("", false) when mech
+// does not start with prefix or carries no domain (a bare "a"/"mx", which the
+// CutPrefix on "a:"/"mx:" already excludes). The trailing /ip4-cidr or //ip6-cidr
+// is stripped — it constrains the matched IP range, not which domain is named.
+func spfDualCIDRDomain(mech, prefix string) (string, bool) {
+	rest, ok := strings.CutPrefix(mech, prefix)
+	if !ok {
+		return "", false
+	}
+	// Strip a trailing dual-CIDR suffix ("/24", "//64", or "/24//64"). The IPv4
+	// CIDR (if any) is delimited by the first "/"; everything from there on is
+	// CIDR syntax, not part of the domain.
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+	domain := normaliseSPFDomain(rest)
+	if domain == "" {
+		return "", false
+	}
+	return domain, true
 }
 
 // normaliseSPFDomain lower-cases and trims an SPF-referenced domain.
@@ -161,17 +226,19 @@ func spfIncludes(ctx context.Context, record string, r *resolver.Resolver, visit
 		// ErrNXDomain from CNAMEChain means the domain is definitively gone.
 		_, aErr := r.CNAMEChain(ctx, domain)
 		if errors.Is(aErr, resolver.ErrNXDomain) {
-			evidence := "SPF include: domain is NXDOMAIN (claimable)"
-			if ref.redirect {
-				evidence = "SPF redirect= domain is NXDOMAIN (claimable)"
-			}
 			findings = append(findings, finding.Finding{
 				Subdomain:  domain,
 				Vector:     finding.VectorSPF,
 				Confidence: finding.Potential,
 				SPFInclude: domain,
-				Evidence:   evidence,
+				Evidence:   "SPF " + ref.directive + " domain is NXDOMAIN (claimable)",
 			})
+			continue
+		}
+
+		// a:/mx: mechanisms authorise the domain's address records directly; they
+		// do not name a downstream SPF policy, so there is nothing to recurse into.
+		if !ref.recursable() {
 			continue
 		}
 

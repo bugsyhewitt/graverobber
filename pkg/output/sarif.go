@@ -129,7 +129,7 @@ var vectorRuleText = map[finding.Vector]struct {
 	finding.VectorSPF: {
 		"SPF dangling reference or permissive policy",
 		"An SPF record references an unregistered domain or authorises any sender.",
-		"The domain's SPF record is either dangling — an include:/redirect= directive points at an unregistered (NXDOMAIN) domain, so registering it lets an attacker authorise spoofed mail (the SubdoMailing vector) — or permissive: a Pass-qualified \"all\" mechanism (+all, or a bare \"all\") authorises every host on the internet to send mail as the domain, leaving it fully spoofable.",
+		"The domain's SPF record is either dangling — an include:/redirect=/a:/mx: directive points at an unregistered (NXDOMAIN) domain, so registering it lets an attacker authorise spoofed mail (the SubdoMailing vector) — or permissive: a Pass-qualified \"all\" mechanism (+all, or a bare \"all\") authorises every host on the internet to send mail as the domain, leaving it fully spoofable.",
 	},
 	finding.VectorMX: {
 		"Dangling MX record takeover",

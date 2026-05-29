@@ -21,7 +21,7 @@ a recon pipeline.
 |---|---|---|
 | CNAME | Dangling CNAME → fingerprint match against a known-vulnerable service | The classic takeover; ~60+ services covered |
 | NS    | Delegated DNS hosted zone deleted at the provider, re-claimable | Hazy Hawk (.edu campaign, 2025–2026) |
-| SPF   | An SPF `include:`/`redirect=` directive points at an unregistered, claimable domain, **or** the policy ends in `+all` (Pass — any host may send mail as the domain) | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day; `+all` = fully spoofable domain |
+| SPF   | An SPF `include:`/`redirect=`/`a:`/`mx:` directive points at an unregistered, claimable domain, **or** the policy ends in `+all` (Pass — any host may send mail as the domain) | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day; `+all` = fully spoofable domain |
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, **or** publishes an inline RSA key below the RFC 8301 1024-bit floor | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012) |
 | DMARC | A `_dmarc` policy is monitor-only (`p=none`, spoofable) **or** its `rua=`/`ruf=` report domain is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon; `p=none` spoofing (BEC/phishing precondition) |
@@ -245,7 +245,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--silent` | false | Results only, suppress progress/banner |
 | `--verbose` | false | Verbose debug logging to stderr |
 | `--no-ns` | false | Skip NS takeover checks |
-| `--no-spf` | false | Skip SPF `include:`/`redirect=` dangling and `+all` permissive-policy checks |
+| `--no-spf` | false | Skip SPF `include:`/`redirect=`/`a:`/`mx:` dangling and `+all` permissive-policy checks |
 | `--no-mx` | false | Skip MX dangling-record checks |
 | `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME + weak inline RSA key) |
 | `--no-dmarc` | false | Skip DMARC report-domain dangling checks |
@@ -310,9 +310,9 @@ above a `confirmed` threshold. The default (flag omitted) emits every finding.
 graverobber flags two classes of SPF weakness: a **dangling reference** and a
 **permissive policy**.
 
-**Dangling reference.** An SPF record can hand control of a target's
-mail-authentication policy to another domain two ways, and both are exploitable
-when that domain is unregistered:
+**Dangling reference.** An SPF record can authorise another domain to send mail
+as the target four ways, and all four are exploitable when that domain is
+unregistered:
 
 - **`include:<domain>`** — a mechanism (RFC 7208 §5.2) that folds another
   domain's SPF record into the evaluation. This is the original SubdoMailing
@@ -321,14 +321,24 @@ when that domain is unregistered:
   domain's SPF record as **the** policy for the target when no mechanism matches.
   A dangling `redirect=` is arguably higher-impact than a dangling `include:`
   because the redirect target's policy replaces the local one wholesale.
+- **`a:<domain>`** — a mechanism (RFC 7208 §5.3) that passes when the sender's IP
+  matches an A/AAAA record of the named domain. An attacker who reclaims a
+  dangling `a:` domain points its address records at their own host and every
+  message they send passes SPF for the target.
+- **`mx:<domain>`** — a mechanism (RFC 7208 §5.4) that passes when the sender's IP
+  matches an A/AAAA record of one of the named domain's MX hosts — the same
+  takeover as `a:`, via the reclaimed domain's mail hosts.
 
-graverobber parses both directives, recurses into the policies of domains that
-still exist (bounded by the RFC 7208 ten-lookup cap), and emits a `POTENTIAL`
-`spf` finding for any referenced domain that resolves `NXDOMAIN` — an attacker
-who registers it controls the SPF evaluation and can authorise spoofed mail. The
-claimable domain is reported in the `spf_include` field for both directive kinds;
-the `evidence` string names which directive (`include:` or `redirect=`) pointed
-at it.
+Only the explicit-domain form of `a:`/`mx:` is a reference; a bare `a` or `mx`
+(optionally with a `/cidr` dual-CIDR suffix) points at the **target's own**
+records and is not a takeover surface, so it is ignored. graverobber parses all
+four directives, recurses into the policies of `include:`/`redirect=` domains
+that still exist (bounded by the RFC 7208 ten-lookup cap), and emits a
+`POTENTIAL` `spf` finding for any referenced domain that resolves `NXDOMAIN` — an
+attacker who registers it can authorise spoofed mail for the target. The claimable
+domain is reported in the `spf_include` field for all four directive kinds; the
+`evidence` string names which directive (`include:`, `redirect=`, `a:`, or `mx:`)
+pointed at it.
 
 **Permissive policy.** The `all` mechanism is the catch-all that ends a
 well-formed SPF record (RFC 7208 §5.1); its qualifier decides the result for any
