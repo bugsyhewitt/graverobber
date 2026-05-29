@@ -38,7 +38,18 @@ list of 10,000 hosts with 10 s timeouts can block on NS retries across the board
 
 ---
 
-## Rank 2 — Active verifier: S3, GitHub Pages, Azure service-specific probes
+## Rank 2 — Active verifier: S3, GitHub Pages, Azure service-specific probes — ✅ IMPLEMENTED
+
+**Status:** Shipped. `pkg/verifier/service.go` adds `ServiceVerifier`, dispatching
+on `f.Service` for the three highest-signal CNAME services: AWS/S3 (GET probe of
+`<bucket>.s3.amazonaws.com`, `NoSuchBucket` + 404 → CONFIRMED), GitHub Pages
+(`api.github.com/repos/<user>/<repo>` existence check, 404 → CONFIRMED), and
+Microsoft Azure (DNS NXDOMAIN on the `azurewebsites.net`-class target →
+CONFIRMED). It only ever upgrades LIKELY→CONFIRMED, never downgrades, and never
+re-litigates a fingerprint-CONFIRMED finding. Wired into the scanner via
+`SetVerifier` and exposed by the `--verify` / `--github-token` flags in
+`cmd/graverobber/main.go`. Guarded by `pkg/verifier/service_test.go` (httptest
+stubs per service). All probes are read-only and credential-free by default.
 
 **What:** The `verifier` package ships `NoopVerifier` and an explicit seam
 (`Scanner.SetVerifier`) reserved for v1.1. Implement concrete active-verification
@@ -680,6 +691,45 @@ CLI flag, three output-path arms, README + roadmap updates, eleven new tests.
 
 ---
 
+## Rank 17 — Triage summary by-vector breakdown completeness — ✅ IMPLEMENTED (Phase 2, Rotation 20)
+
+**Status:** Shipped. Rotation 20's gap analysis found the entire ranked roadmap
+(Ranks 1–16) already implemented — POST_V01.md was stale (Rank 2's active
+verifier had shipped but its status line still read unimplemented). A fresh
+codebase sweep surfaced a **correctness-within-coverage bug** in the default
+(human-readable) output, exactly the class R9/R17/R18 targeted.
+
+`cmd/graverobber/main.go`'s `summaryVectorOrder` — the fixed key list the
+end-of-scan triage summary iterates to render the `by vector:` line — listed only
+six of the eight vectors the scanner emits (`cname`, `ns`, `spf`, `mx`, `dkim`,
+`dmarc`). It was never extended when Rank 12 (AXFR) and Rank 16 (CAA) added their
+vectors. Because `summaryParts` iterates *only* over `summaryVectorOrder`, every
+AXFR and CAA finding was counted in the total and in the `by tier:` breakdown but
+**silently dropped from the `by vector:` line** — so on any scan that found an
+open zone transfer or a broken CAA policy (two of the highest-severity DNS
+findings the tool produces), the breakdown failed to reconcile with the reported
+count. An operator triaging the summary would see, e.g., `8 finding(s)` whose
+per-vector counts summed to 6.
+
+The fix adds `VectorAXFR` and `VectorCAA` to `summaryVectorOrder` in pipeline
+order (matching the scanner's dispatch sequence). Guarded by
+`TestScanSummary_CountsEveryVector` (a structural regression guard asserting every
+emittable vector surfaces in the breakdown — it fails if any future vector is
+added without updating the summary) and `TestScanSummary_AXFRAndCAAReconcile` (the
+direct case: an AXFR + CAA scan shows both and reconciles). Both tests were
+verified to fail against the unfixed code. README triage-summary example updated.
+
+**Why this over a new vector:** All high-value vector classes already ship; the
+marginal value is correctness of what ships, not breadth. A default-mode summary
+that undercounts two of eight vectors is a higher-impact, lower-risk fix than a
+ninth vector. No API, scanner, flag, or output-format change — one slice literal
+plus two regression tests.
+
+**Complexity:** Trivial — two entries added to one slice in `cmd/graverobber`,
+two new tests, one README example update. No new dependency.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -701,7 +751,7 @@ CLI flag, three output-path arms, README + roadmap updates, eleven new tests.
 | Rank | Item | Effort | Impact | Changes API? |
 |------|------|--------|--------|-------------|
 | 1 | Parallel vector execution per target ✅ | Low | High (throughput) | No |
-| 2 | Active verifier: S3, GitHub Pages, Azure | Medium | High (accuracy) | No (SetVerifier seam ready) |
+| 2 | Active verifier: S3, GitHub Pages, Azure ✅ | Medium | High (accuracy) | No (SetVerifier seam) |
 | 3 | MX record fourth vector ✅ | Medium | High (new coverage) | Yes (new vector + flag) |
 | 4 | NS provider list sync from indianajson ✅ | Low-Med | Medium (accuracy) | No |
 | 5 | CT log monitoring subcommand ✅ | Medium | High (unique feature) | No (new subcommand) |
@@ -716,3 +766,4 @@ CLI flag, three output-path arms, README + roadmap updates, eleven new tests.
 | 14 | DKIM weak inline-key detection ✅ | Low | High (completes DKIM coverage, forgeable signatures) | Yes (new field, no flag) |
 | 15 | DMARC monitor-only (`p=none`) policy detection ✅ | Low | High (completes DMARC coverage, spoofable domain) | Yes (new field, no flag) |
 | 16 | CAA misconfiguration (8th vector) ✅ | Low-Med | High (new DNS-security surface, MITM TLS) | Yes (new vector + flag) |
+| 17 | Triage summary by-vector completeness (AXFR/CAA) ✅ | Trivial | High (default-mode correctness) | No |

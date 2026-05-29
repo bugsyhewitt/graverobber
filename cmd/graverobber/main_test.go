@@ -178,6 +178,81 @@ func TestScanSummary_BreakdownOrderIsStable(t *testing.T) {
 	}
 }
 
+// allEmittableVectors is every Vector the scanner can produce — one per detector
+// wired into scanner.scanTarget. The summary breakdown must cover all of them.
+var allEmittableVectors = []finding.Vector{
+	finding.VectorCNAME, finding.VectorNS, finding.VectorSPF,
+	finding.VectorMX, finding.VectorDKIM, finding.VectorDMARC,
+	finding.VectorAXFR, finding.VectorCAA,
+}
+
+// TestScanSummary_CountsEveryVector verifies the by-vector breakdown surfaces
+// every vector the scanner can emit. A vector missing from summaryVectorOrder is
+// silently dropped from the "by vector:" line while still counting toward the
+// total and the tier breakdown — so the breakdown stops reconciling. AXFR and
+// CAA were added as vectors (POST_V01 Ranks 12, 16) but were initially left out
+// of summaryVectorOrder; this test guards against that class of drift.
+func TestScanSummary_CountsEveryVector(t *testing.T) {
+	var s scanSummary
+	for _, v := range allEmittableVectors {
+		s.tally(finding.Finding{Vector: v, Confidence: finding.Potential})
+	}
+
+	var buf bytes.Buffer
+	s.write(&buf)
+	got := buf.String()
+
+	// Every emittable vector must appear with its count in the by-vector line.
+	for _, v := range allEmittableVectors {
+		want := string(v) + "=1"
+		if !strings.Contains(got, want) {
+			t.Errorf("summary %q missing vector breakdown %q", got, want)
+		}
+	}
+
+	// The by-vector counts must reconcile with the total: sum of the per-vector
+	// counts equals s.total. We assert this structurally by confirming the
+	// breakdown lists exactly len(allEmittableVectors) "=1" pairs in the
+	// by-vector line.
+	line := vectorLine(t, got)
+	if n := strings.Count(line, "=1"); n != len(allEmittableVectors) {
+		t.Errorf("by-vector line %q has %d entries, want %d (one per emittable vector)",
+			line, n, len(allEmittableVectors))
+	}
+}
+
+// TestScanSummary_AXFRAndCAAReconcile verifies the regression directly: a scan
+// whose only findings are AXFR and CAA must show both in the by-vector line so
+// the breakdown total matches the reported count.
+func TestScanSummary_AXFRAndCAAReconcile(t *testing.T) {
+	var s scanSummary
+	s.tally(finding.Finding{Vector: finding.VectorAXFR, Confidence: finding.Confirmed})
+	s.tally(finding.Finding{Vector: finding.VectorCAA, Confidence: finding.Potential})
+
+	var buf bytes.Buffer
+	s.write(&buf)
+	got := buf.String()
+
+	for _, want := range []string{"graverobber: 2 finding(s)", "axfr=1", "caa=1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary %q missing %q", got, want)
+		}
+	}
+}
+
+// vectorLine returns the "by vector:" line from a rendered summary, failing the
+// test if it is absent.
+func vectorLine(t *testing.T, summary string) string {
+	t.Helper()
+	for _, line := range strings.Split(summary, "\n") {
+		if strings.Contains(line, "by vector:") {
+			return line
+		}
+	}
+	t.Fatalf("summary %q has no by-vector line", summary)
+	return ""
+}
+
 // TestBoolCount guards the helper behind the format mutual-exclusion check.
 func TestBoolCount(t *testing.T) {
 	cases := []struct {
