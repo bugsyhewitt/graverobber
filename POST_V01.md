@@ -463,6 +463,48 @@ README sections.
 
 ---
 
+## Rank 13 — SPF `redirect=` modifier dangling detection — ✅ IMPLEMENTED (Phase 2, Rotation 16)
+
+**Status:** Shipped. Ranks 1–12 covered the seven takeover vectors, active
+verification, and the full output story (terminal/JSONL/SARIF/CSV + triage
+summary). The next-highest-value gap was not a new vector but a **completeness
+hole inside an existing one**: the SPF detector handled only the `include:`
+mechanism and silently ignored the `redirect=` modifier — the other RFC 7208
+directive that hands a target's SPF policy to an external domain.
+
+A policy like `v=spf1 redirect=_spf.gone-vendor.com` with an unregistered
+redirect target produced **zero findings** before this rotation, despite being
+the same SubdoMailing-class takeover as a dangling `include:` (and arguably
+higher-impact: `redirect=` designates the target's record as *the* policy
+wholesale, per RFC 7208 §6.1, rather than merely folding it in).
+
+`detectors.SPF` now parses both directives in one pass via the new
+`spfReferences` helper (returning `[]spfReference{domain, redirect}`), recurses
+into the policies of domains that still exist (still bounded by `maxSPFDepth` =
+the RFC 7208 ten-lookup cap), and emits a `POTENTIAL` `VectorSPF` finding for any
+referenced domain that resolves `NXDOMAIN`. The claimable domain populates the
+existing `SPFInclude` field for both directive kinds; only the `Evidence` string
+differs (`SPF include: domain is NXDOMAIN (claimable)` vs.
+`SPF redirect= domain is NXDOMAIN (claimable)`). No schema change, no new flag,
+no new dependency — fully on-ethos (DNS-only, std-lib + miekg/dns).
+
+Guarded by `TestSPFReferences` (table-driven parse: include/redirect/mixed-case/
+ignorable-mechanisms), `TestSPF_DanglingRedirectPotential` (full detector against
+a hermetic local DNS server, asserts one POTENTIAL finding whose evidence names
+`redirect=`), and `TestSPF_LiveRedirectNoFinding` (a resolving redirect target
+yields no finding). The existing `include:` tests remain unchanged and green.
+
+**Why this over a new vector:** All high-value vector *classes* already ship; the
+marginal value is now correctness-within-coverage. A directive the detector
+parses-but-half — silently missing `redirect=` — is a higher-impact, lower-risk
+fix than an eighth vector, and it closes the SPF surface to match the RFC. The
+change is contained to one detector file plus tests.
+
+**Complexity:** Low — one parse-helper refactor in `pkg/detectors/spf.go`, three
+new tests, README directive/flag updates. No API, scanner, or output change.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -495,3 +537,4 @@ README sections.
 | 10 | SARIF 2.1.0 output for CI / Code Scanning ✅ | Low-Med | High (CI integration) | No (new flag only) |
 | 11 | CSV output for spreadsheet / ticket triage ✅ | Low | Med-High (analyst triage) | No (new flag only) |
 | 12 | AXFR zone-transfer misconfiguration (7th vector) ✅ | Medium | High (new DNS surface, force-multiplier) | Yes (new vector + flag) |
+| 13 | SPF `redirect=` modifier dangling detection ✅ | Low | High (completes SPF coverage, same takeover) | No |

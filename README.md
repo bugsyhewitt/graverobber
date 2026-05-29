@@ -21,7 +21,7 @@ a recon pipeline.
 |---|---|---|
 | CNAME | Dangling CNAME → fingerprint match against a known-vulnerable service | The classic takeover; ~60+ services covered |
 | NS    | Delegated DNS hosted zone deleted at the provider, re-claimable | Hazy Hawk (.edu campaign, 2025–2026) |
-| SPF   | An SPF `include:` directive points at an unregistered, claimable domain | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day |
+| SPF   | An SPF `include:` mechanism or `redirect=` modifier points at an unregistered, claimable domain | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day |
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an ESP resource that is now NXDOMAIN | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024) |
 | DMARC | A `_dmarc` policy's `rua=`/`ruf=` report domain is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon |
@@ -221,7 +221,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--silent` | false | Results only, suppress progress/banner |
 | `--verbose` | false | Verbose debug logging to stderr |
 | `--no-ns` | false | Skip NS takeover checks |
-| `--no-spf` | false | Skip SPF include checks |
+| `--no-spf` | false | Skip SPF `include:`/`redirect=` checks |
 | `--no-mx` | false | Skip MX dangling-record checks |
 | `--no-dkim` | false | Skip DKIM selector dangling-CNAME checks |
 | `--no-dmarc` | false | Skip DMARC report-domain dangling checks |
@@ -275,6 +275,29 @@ cat hosts.txt | graverobber --min-confidence likely
 The tiers are ordered `CONFIRMED` ≥ `LIKELY` ≥ `POTENTIAL`. The filter is applied
 *after* `--verify`, so a probe that upgrades a `LIKELY` finding to `CONFIRMED` keeps it
 above a `confirmed` threshold. The default (flag omitted) emits every finding.
+
+### SPF policy takeover (`--no-spf`)
+
+An SPF record can hand control of a target's mail-authentication policy to
+another domain two ways, and both are exploitable when that domain is
+unregistered:
+
+- **`include:<domain>`** — a mechanism (RFC 7208 §5.2) that folds another
+  domain's SPF record into the evaluation. This is the original SubdoMailing
+  vector (Guardio Labs, 2024).
+- **`redirect=<domain>`** — a modifier (RFC 7208 §6.1) that designates another
+  domain's SPF record as **the** policy for the target when no mechanism matches.
+  A dangling `redirect=` is arguably higher-impact than a dangling `include:`
+  because the redirect target's policy replaces the local one wholesale.
+
+graverobber parses both directives, recurses into the policies of domains that
+still exist (bounded by the RFC 7208 ten-lookup cap), and emits a `POTENTIAL`
+`spf` finding for any referenced domain that resolves `NXDOMAIN` — an attacker
+who registers it controls the SPF evaluation and can authorise spoofed mail. The
+claimable domain is reported in the `spf_include` field for both directive kinds;
+the `evidence` string names which directive (`include:` or `redirect=`) pointed
+at it. DNS-only signal, no fingerprint — classified `POTENTIAL` like the rest of
+the email-auth surface.
 
 ### DKIM selector takeover (`--no-dkim`, `--selectors`)
 
@@ -365,7 +388,7 @@ JSONL — one finding per line:
 Without `--json`, findings render as one coloured human-readable line per
 finding. Each line carries the confidence tier, the vector tag, the subdomain,
 and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
-`include:` domain (`spf`), the failed nameservers (`ns`), the dangling
+`include:`/`redirect=` domain (`spf`), the failed nameservers (`ns`), the dangling
 mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation
 (`dkim`), the claimable `rua`/`ruf` report domain (`dmarc`), or the leaking
 nameserver and leaked-host count (`axfr`). ANSI colour is emitted only to a TTY;
