@@ -105,6 +105,7 @@ func TestCSV_TargetColumnPerVector(t *testing.T) {
 	}{
 		{"cname", finding.Finding{Vector: finding.VectorCNAME, CNAME: "x.s3.amazonaws.com"}, "x.s3.amazonaws.com"},
 		{"spf", finding.Finding{Vector: finding.VectorSPF, SPFInclude: "claimable.net"}, "claimable.net"},
+		{"spf-lookup-limit", finding.Finding{Vector: finding.VectorSPF, SPFLookups: 12}, "12 DNS lookups (permerror)"},
 		{"ns", finding.Finding{Vector: finding.VectorNS, Nameservers: []string{"ns1.gone.net", "ns2.gone.net"}}, "ns1.gone.net ns2.gone.net"},
 		{"mx", finding.Finding{Vector: finding.VectorMX, MXHosts: []string{"mail.gone.net"}}, "mail.gone.net"},
 		{"dkim", finding.Finding{Vector: finding.VectorDKIM, DKIMSelector: "s1", CNAME: "s1.domainkey.gone.sendgrid.net"}, "s1._domainkey -> s1.domainkey.gone.sendgrid.net"},

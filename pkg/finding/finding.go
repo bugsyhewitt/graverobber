@@ -19,15 +19,21 @@ const (
 	// VectorNS: the delegated DNS hosted zone has been deleted at the provider
 	// and is re-claimable.
 	VectorNS Vector = "ns"
-	// VectorSPF: an SPF record is either dangling or permissive. In the dangling
-	// sub-case an include:/redirect=/a:/mx: directive references a domain that is
-	// unregistered and therefore claimable (the SubdoMailing vector); the
-	// SPFInclude field carries the claimable domain. In the permissive sub-case
-	// the record's "all" mechanism qualifies as Pass (+all, or a bare "all" which
-	// RFC 7208 §4.6.2 treats as +all) — authorising any host on the internet to
-	// send mail as the domain, leaving it fully spoofable; the SPFAll field
-	// carries the offending mechanism token. The two sub-cases are distinguished
-	// by which of SPFInclude / SPFAll is set.
+	// VectorSPF: an SPF record is dangling, permissive, or exceeds the RFC 7208
+	// §4.6.4 DNS-lookup cap. In the dangling sub-case an include:/redirect=/a:/mx:
+	// directive references a domain that is unregistered and therefore claimable
+	// (the SubdoMailing vector); the SPFInclude field carries the claimable
+	// domain. In the permissive sub-case the record's "all" mechanism qualifies
+	// as Pass (+all, or a bare "all" which RFC 7208 §4.6.2 treats as +all) —
+	// authorising any host on the internet to send mail as the domain, leaving
+	// it fully spoofable; the SPFAll field carries the offending mechanism
+	// token. In the lookup-limit sub-case the record's DNS-querying mechanisms
+	// (include, a, mx, ptr, exists, redirect=) total more than 10 across the
+	// recursed evaluation, which RFC 7208 §4.6.4 mandates causes "permerror" at
+	// every SPF-checking receiver — the SPF check hard-fails and the domain
+	// becomes spoofable by omission as DMARC alignment collapses; the SPFLookups
+	// field carries the offending count. The three sub-cases are distinguished
+	// by which of SPFInclude / SPFAll / SPFLookups is set.
 	VectorSPF Vector = "spf"
 	// VectorMX: a dangling MX record points at a mail host that is NXDOMAIN or
 	// belongs to a cloud mail provider whose hosted zone has been deleted.
@@ -212,6 +218,15 @@ type Finding struct {
 	// authorises any host to send mail as the domain. It is empty for the
 	// dangling sub-case, which is identified instead by the SPFInclude field.
 	SPFAll string `json:"spf_all,omitempty"`
+	// SPFLookups is set for the lookup-limit-exceeded VectorSPF sub-case: the
+	// total number of DNS-querying mechanisms and modifiers evaluated across the
+	// record and its recursed include:/redirect= policies (include, a, mx, ptr,
+	// exists, redirect=, per RFC 7208 §4.6.4). It is reported only when the
+	// count exceeds the §4.6.4 cap of 10 — beyond that, every SPF-checking
+	// receiver returns "permerror" and the domain's SPF check hard-fails, taking
+	// down DMARC alignment and exposing the domain to spoofing-by-omission. The
+	// field is zero (omitted) for every other sub-case.
+	SPFLookups int `json:"spf_lookups,omitempty"`
 	// MXHosts is set for VectorMX findings: the dangling mail-exchanger hostnames.
 	MXHosts []string `json:"mx_hosts,omitempty"`
 	// DKIMSelector is set for VectorDKIM findings: the selector whose
