@@ -150,6 +150,8 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		detail = fmt.Sprintf("bimi asset host %s NXDOMAIN (dangling brand logo/VMC)", f.BIMIURIHost)
 	case finding.VectorDNSSEC:
 		detail = fmt.Sprintf("dnssec orphaned DS %s (parent DS, no child DNSKEY — SERVFAIL outage)", formatKeyTags(f.DSKeyTags))
+	case finding.VectorTLSRPT:
+		detail = fmt.Sprintf("tlsrpt report host %s NXDOMAIN (dangling — TLS-report interception)", f.TLSRPTURIHost)
 	}
 
 	_, err := fmt.Fprintf(t.w, "[%s] [%s] %s  %s\n",

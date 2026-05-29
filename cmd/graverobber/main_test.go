@@ -185,6 +185,7 @@ var allEmittableVectors = []finding.Vector{
 	finding.VectorMX, finding.VectorDKIM, finding.VectorDMARC,
 	finding.VectorAXFR, finding.VectorCAA, finding.VectorTLSA,
 	finding.VectorMTASTS, finding.VectorBIMI, finding.VectorDNSSEC,
+	finding.VectorTLSRPT,
 }
 
 // TestScanSummary_CountsEveryVector verifies the by-vector breakdown surfaces

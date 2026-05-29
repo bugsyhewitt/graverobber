@@ -84,6 +84,7 @@ type cliFlags struct {
 	noMTASTS      bool
 	noBIMI        bool
 	noDNSSEC      bool
+	noTLSRPT      bool
 	selectors     string
 	fingerprints  []string
 	offline       bool
@@ -101,14 +102,15 @@ func newRootCmd() *cobra.Command {
 
 	root := &cobra.Command{
 		Use:   "graverobber",
-		Short: "Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, DMARC, AXFR, CAA, TLSA, MTA-STS, BIMI, and DNSSEC dangling/misconfigured records",
+		Short: "Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, DMARC, AXFR, CAA, TLSA, MTA-STS, BIMI, DNSSEC, and TLSRPT dangling/misconfigured records",
 		Long: "graverobber digs up the subdomains your target left for dead.\n" +
 			"It detects CNAME fingerprint, NS zone-deletion, SPF include, MX\n" +
 			"dangling-record, DKIM selector, DMARC report-domain takeover, AXFR\n" +
 			"zone-transfer misconfiguration, CAA misconfiguration, TLSA dangling\n" +
 			"DANE pin, MTA-STS dangling-policy-host takeover, BIMI dangling-asset\n" +
-			"host, and DNSSEC orphaned-DS (broken chain-of-trust) outages across a\n" +
-			"stream of hosts read from stdin, a file, or -t.",
+			"host, DNSSEC orphaned-DS (broken chain-of-trust) outages, and TLSRPT\n" +
+			"dangling-report-destination interception across a stream of hosts read\n" +
+			"from stdin, a file, or -t.",
 		Version: version,
 		Args:    cobra.NoArgs,
 		// The command reports findings via the errFindings sentinel and its
@@ -143,6 +145,7 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVar(&f.noMTASTS, "no-mtasts", false, "skip MTA-STS dangling-policy-host checks")
 	fl.BoolVar(&f.noBIMI, "no-bimi", false, "skip BIMI dangling-asset-host checks")
 	fl.BoolVar(&f.noDNSSEC, "no-dnssec", false, "skip DNSSEC orphaned-DS (broken chain-of-trust) checks")
+	fl.BoolVar(&f.noTLSRPT, "no-tlsrpt", false, "skip TLSRPT dangling-report-destination checks")
 	fl.StringVar(&f.selectors, "selectors", "", "comma-separated DKIM selectors to probe (default: common ESP selectors)")
 	fl.StringArrayVar(&f.fingerprints, "fingerprints", nil, "additional fingerprint JSON to merge (repeatable)")
 	fl.BoolVar(&f.offline, "offline", false, "use cached/embedded fingerprints only, no network")
@@ -250,6 +253,7 @@ func runScan(ctx context.Context, f *cliFlags) error {
 		NoMTASTS:      f.noMTASTS,
 		NoBIMI:        f.noBIMI,
 		NoDNSSEC:      f.noDNSSEC,
+		NoTLSRPT:      f.noTLSRPT,
 		HTTPOnly:      f.httpOnly,
 		HTTPSOnly:     f.httpsOnly,
 		Resolvers:     resolvers,
@@ -338,6 +342,7 @@ var summaryVectorOrder = []finding.Vector{
 	finding.VectorMX, finding.VectorDKIM, finding.VectorDMARC,
 	finding.VectorAXFR, finding.VectorCAA, finding.VectorTLSA,
 	finding.VectorMTASTS, finding.VectorBIMI, finding.VectorDNSSEC,
+	finding.VectorTLSRPT,
 }
 
 // write renders the summary to w. With no findings it prints the bare count line

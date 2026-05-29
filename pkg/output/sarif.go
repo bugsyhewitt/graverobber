@@ -176,6 +176,11 @@ var vectorRuleText = map[finding.Vector]struct {
 		"The parent zone publishes a DS record but the domain has no DNSKEY.",
 		"The domain's parent zone publishes a DS (Delegation Signer, RFC 4034) record — committing every DNSSEC-validating resolver to build an authenticated chain of trust into the domain's zone — but the domain itself publishes no DNSKEY, so the chain cannot be completed. DNSSEC validation fails closed: every validating resolver (the default at Google Public DNS, Cloudflare 1.1.1.1, Quad9, and most ISPs) returns SERVFAIL for the entire zone, taking the domain and all its services (web, mail, APIs) offline for a large fraction of the internet while it resolves normally on non-validating resolvers. It is typically caused by disabling DNSSEC at the child or migrating DNS providers without first removing the DS at the registrar — a self-inflicted denial of service repaired by removing the orphaned DS or re-signing the zone.",
 	},
+	finding.VectorTLSRPT: {
+		"Dangling TLSRPT report destination",
+		"A TLSRPT rua= report destination host is NXDOMAIN.",
+		"A domain advertises SMTP TLS Reporting (TLSRPT, RFC 8460) via a \"v=TLSRPTv1\" TXT record at _smtp._tls.<domain> whose rua= report destination — a mailto: address domain or an https: collector host — is NXDOMAIN. TLSRPT is the feedback channel that surfaces SMTP TLS-negotiation failures, including the failures an attacker mounting a TLS downgrade against the domain's inbound mail would cause. An attacker who reclaims the dangling destination receives every TLSRPT report sent for the target: delivery-counterparty and infrastructure reconnaissance, plus a live view of the very downgrade failures that would otherwise alert the domain owner — silently confirming and tuning an active attack while the owner is blinded.",
+	},
 }
 
 // ruleForVector builds the SARIF rule descriptor for a vector. Unknown vectors
@@ -304,6 +309,8 @@ func sarifMessage(f finding.Finding) string {
 		detail = fmt.Sprintf("BIMI asset host %s is NXDOMAIN (dangling — reclaimable to serve a forged brand logo/VMC)", f.BIMIURIHost)
 	case finding.VectorDNSSEC:
 		detail = fmt.Sprintf("orphaned DS (%s) at the parent with no DNSKEY in %s — DNSSEC chain broken, validating resolvers SERVFAIL the whole zone", formatKeyTags(f.DSKeyTags), f.Subdomain)
+	case finding.VectorTLSRPT:
+		detail = fmt.Sprintf("TLSRPT report destination %s is NXDOMAIN (dangling — reclaimable to intercept SMTP-TLS failure reports)", f.TLSRPTURIHost)
 	}
 	msg := fmt.Sprintf("[%s] %s takeover candidate on %s", f.Confidence, f.Vector, f.Subdomain)
 	if detail != "" {

@@ -539,6 +539,61 @@ func TestRun_NoCAADisablesCAAVector(t *testing.T) {
 	}
 }
 
+// TestRun_NoTLSRPTDisablesTLSRPTVector verifies that when NoTLSRPT is set the
+// tlsRptVector function is not called, and that when NoTLSRPT is false it is
+// called once. TLSRPT is opt-out (on by default), mirroring the other DNS
+// vectors.
+func TestRun_NoTLSRPTDisablesTLSRPTVector(t *testing.T) {
+	origTLSRPT := tlsRptVector
+	t.Cleanup(func() { tlsRptVector = origTLSRPT })
+
+	var tlsRptCalls int32
+	tlsRptVector = func(_ context.Context, _ *Scanner, _ string) ([]finding.Finding, error) {
+		atomic.AddInt32(&tlsRptCalls, 1)
+		return nil, nil
+	}
+
+	db, err := fingerprints.Load([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("load db: %v", err)
+	}
+
+	runWith := func(noTLSRPT bool) int32 {
+		atomic.StoreInt32(&tlsRptCalls, 0)
+		sc := New(db, Options{
+			Concurrency: 1,
+			Timeout:     200 * time.Millisecond,
+			NoNS:        true,
+			NoSPF:       true,
+			NoMX:        true,
+			NoDKIM:      true,
+			NoDMARC:     true,
+			NoAXFR:      true,
+			NoCAA:       true,
+			NoTLSA:      true,
+			NoMTASTS:    true,
+			NoBIMI:      true,
+			NoDNSSEC:    true,
+			NoTLSRPT:    noTLSRPT,
+		})
+		targets := make(chan string, 1)
+		targets <- "sub.example.com"
+		close(targets)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		for range sc.Run(ctx, targets) {
+		}
+		return atomic.LoadInt32(&tlsRptCalls)
+	}
+
+	if got := runWith(true); got != 0 {
+		t.Errorf("NoTLSRPT=true: tlsRptVector called %d times, want 0", got)
+	}
+	if got := runWith(false); got != 1 {
+		t.Errorf("NoTLSRPT=false: tlsRptVector called %d times, want 1", got)
+	}
+}
+
 // ---- --min-confidence filter ----------------------------------------------
 
 // TestRun_MinConfidenceFiltersWeakerFindings stubs the CNAME vector to emit one
