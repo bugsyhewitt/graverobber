@@ -95,6 +95,18 @@ const (
 	// in BIMIURIHost and the BIMI owner name (e.g. "default._bimi.example.com") in
 	// Service.
 	VectorBIMI Vector = "bimi"
+	// VectorDNSSEC: a domain's PARENT zone publishes a DS (Delegation Signer,
+	// RFC 4034) record committing every validating resolver to an authenticated
+	// DNSSEC chain into the domain's zone, but the domain itself publishes NO
+	// DNSKEY — an orphaned DS. The chain of trust cannot be built, so every
+	// DNSSEC-validating resolver (the default at Google Public DNS, Cloudflare
+	// 1.1.1.1, Quad9, and most ISPs) returns SERVFAIL for the entire zone: the
+	// domain and all its records become unreachable to a large fraction of the
+	// internet — a self-inflicted denial of service, typically caused by
+	// disabling DNSSEC at the child or migrating DNS providers without first
+	// removing the DS at the registrar. The orphaned DS key tags are carried in
+	// DSKeyTags and the Evidence string explains the broken chain.
+	VectorDNSSEC Vector = "dnssec"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.
@@ -217,6 +229,11 @@ type Finding struct {
 	// therefore reclaimable. The BIMI owner name is carried in Service; the
 	// Evidence string names which tag (l= or a=) pointed at the dangling host.
 	BIMIURIHost string `json:"bimi_uri_host,omitempty"`
+	// DSKeyTags is set for VectorDNSSEC findings: the key tags of the orphaned DS
+	// records published by the parent zone for the target. They identify the
+	// stale delegation-signer records that must be removed at the registrar (or
+	// matched by re-signing the child zone) to repair the broken DNSSEC chain.
+	DSKeyTags []uint16 `json:"ds_key_tags,omitempty"`
 
 	// Scheme records which scheme produced an HTTP-based match: "https" or
 	// "http" (see handoff open question #4).

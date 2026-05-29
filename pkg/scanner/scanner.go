@@ -36,6 +36,7 @@ type Options struct {
 	NoTLSA        bool          // skip the TLSA dangling-DANE-pin vector
 	NoMTASTS      bool          // skip the MTA-STS dangling-policy-host vector
 	NoBIMI        bool          // skip the BIMI dangling-asset-host vector
+	NoDNSSEC      bool          // skip the DNSSEC orphaned-DS vector
 	HTTPOnly      bool          // probe services over HTTP only
 	HTTPSOnly     bool          // probe services over HTTPS only
 	Resolvers     []string      // custom recursive DNS resolvers
@@ -178,6 +179,9 @@ var (
 	bimiVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
 		return detectors.BIMI(ctx, target, s.resolver)
 	}
+	dnssecVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.DNSSEC(ctx, target, s.resolver)
+	}
 )
 
 // scanTarget runs the per-target detection pipeline and emits any findings.
@@ -225,6 +229,9 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.M
 	}
 	if !s.opts.NoBIMI {
 		vectors = append(vectors, bimiVector)
+	}
+	if !s.opts.NoDNSSEC {
+		vectors = append(vectors, dnssecVector)
 	}
 
 	// Fan out: run each enabled vector concurrently, collecting findings into a
