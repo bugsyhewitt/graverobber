@@ -110,7 +110,10 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 			detail = fmt.Sprintf("mx %v", f.MXHosts)
 		}
 	case finding.VectorDKIM:
-		if f.DKIMSelector != "" {
+		switch {
+		case f.DKIMKeyBits > 0:
+			detail = fmt.Sprintf("dkim %s._domainkey weak %d-bit RSA key", f.DKIMSelector, f.DKIMKeyBits)
+		case f.DKIMSelector != "":
 			detail = fmt.Sprintf("dkim %s._domainkey -> %s", f.DKIMSelector, f.CNAME)
 		}
 	case finding.VectorDMARC:

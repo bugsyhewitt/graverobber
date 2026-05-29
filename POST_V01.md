@@ -505,6 +505,58 @@ new tests, README directive/flag updates. No API, scanner, or output change.
 
 ---
 
+## Rank 14 — DKIM weak inline-key detection — ✅ IMPLEMENTED (Phase 2, Rotation 17)
+
+**Status:** Shipped. Ranks 1–13 covered the seven takeover vectors, active
+verification, the full output story, and closed the SPF surface (`redirect=`).
+The next-highest-value gap was, like R16, a **completeness hole inside an
+existing vector**: the DKIM detector only inspected selectors *delegated by
+CNAME* (the dangling-ESP case) and `continue`d past every selector whose key was
+published *inline* as a TXT record — silently ignoring the second, equally
+exploitable DKIM weakness: a short RSA key.
+
+`detectors.DKIM` now takes the inline-key path whenever a selector has no CNAME:
+it fetches the selector's TXT record, parses the DKIM key tags (`v`/`k`/`p`),
+base64-decodes the `p=` public key (DER SubjectPublicKeyInfo or bare PKCS#1),
+and emits a `LIKELY` `dkim` finding for any RSA modulus below the RFC 8301
+1024-bit floor (`minDKIMKeyBits`). The new `DKIMKeyBits` (`dkim_key_bits`) field
+carries the offending size and distinguishes the weak-key sub-case from the
+dangling-CNAME sub-case (which is identified by `CNAME`). Confidence is `LIKELY`,
+not `CONFIRMED`: a short key is a definitive cryptographic weakness but the
+forge-and-deliver step is an active exploit, mirroring the tool's confidence
+ladder. Non-RSA keys (ed25519), revoked keys (empty `p=`), keys at/above the
+floor, and non-DKIM TXT records are never flagged — graverobber reports no
+finding it cannot substantiate.
+
+All four output paths render the new sub-case (terminal/CSV/SARIF detail show
+`<sel>._domainkey weak <N>-bit RSA key`; JSONL serialises `dkim_key_bits`); the
+SARIF `graverobber/dkim` rule description now covers both DKIM weaknesses.
+
+**Why this over a new vector:** Every high-value vector *class* already ships;
+the marginal value is correctness-within-coverage. A detector that parses DKIM
+selectors but checks only half of the documented DKIM weaknesses is a
+higher-impact, lower-risk fix than a new vector — and it requires no new flag, no
+new resolver primitive (reuses `TXT`), and no new dependency (std-lib
+`crypto/x509` + `encoding/base64`). Fully on-ethos: DNS-only, credential-free.
+
+**Schema:** new `DKIMKeyBits int` (`json:"dkim_key_bits,omitempty"`) on
+`Finding`. No new flag (folded into the existing `--no-dkim` / `--selectors`).
+
+Guarded by `TestParseDKIMTags`, `TestRSAPublicKeyBits`, `TestWeakDKIMKeyBits`
+(table-driven: weak 512/768, default-`k`, strong, revoked, non-RSA, non-DKIM,
+wrong version), `TestDKIM_WeakInlineKeyLikely` and
+`TestDKIM_StrongInlineKeyNoFinding` (full detector against a hermetic local DNS
+server), plus a new `dkim-weak-key` case in the table-driven terminal output
+test. The pre-generated sub-1024 keys are constants because modern Go's
+`crypto/rsa` refuses to *generate* insecure keys (the very weakness flagged)
+while `x509` still parses them.
+
+**Complexity:** Low — one inline-key path + three parse helpers in
+`pkg/detectors/dkim.go`, one schema field, three output-detail arms, README +
+roadmap updates, seven new tests. No API, scanner, or flag change.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -538,3 +590,4 @@ new tests, README directive/flag updates. No API, scanner, or output change.
 | 11 | CSV output for spreadsheet / ticket triage ✅ | Low | Med-High (analyst triage) | No (new flag only) |
 | 12 | AXFR zone-transfer misconfiguration (7th vector) ✅ | Medium | High (new DNS surface, force-multiplier) | Yes (new vector + flag) |
 | 13 | SPF `redirect=` modifier dangling detection ✅ | Low | High (completes SPF coverage, same takeover) | No |
+| 14 | DKIM weak inline-key detection ✅ | Low | High (completes DKIM coverage, forgeable signatures) | Yes (new field, no flag) |

@@ -2,12 +2,28 @@ package detectors
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/bugsyhewitt/graverobber/pkg/finding"
 	"github.com/bugsyhewitt/graverobber/pkg/resolver"
 )
+
+// minDKIMKeyBits is the RSA modulus floor below which an inline DKIM key is
+// reported as weak. RFC 8301 (Jan 2018) updated RFC 6376 to require signers and
+// verifiers to support 1024–4096-bit keys and to deprecate anything shorter:
+// "Signers MUST use RSA keys of at least 1024 bits." A 512-bit DKIM key has
+// been factored in hours on commodity hardware (the 2012 Zachary Harris
+// disclosure against Google, eBay, PayPal, et al.), and 768-bit RSA fell to an
+// academic factoring effort in 2009. Any key strictly below 1024 bits lets an
+// attacker recover the private key and forge DKIM-passing mail without ever
+// touching DNS, so it is a real, exploitable spoofing weakness independent of
+// the dangling-CNAME case.
+const minDKIMKeyBits = 1024
 
 // DefaultDKIMSelectors is the list of DKIM selectors graverobber probes when no
 // override is supplied. DKIM public keys live at <selector>._domainkey.<domain>;
@@ -33,20 +49,26 @@ var DefaultDKIMSelectors = []string{
 	"smtp",      // common self-hosted name
 }
 
-// DKIM detects subdomain takeover via a dangling DKIM selector CNAME.
+// DKIM detects two DKIM-selector weaknesses, both of which let an attacker sign
+// mail that passes DKIM verification for the target domain.
 //
-// Algorithm (POST_V01.md Rank 6 — DKIM selector dangling CNAME detection):
+// Algorithm:
 //  1. For each selector, build the FQDN <selector>._domainkey.<target>.
-//  2. Resolve its CNAME (resolver.RawCNAME). A selector with no CNAME (TXT key
-//     published inline, or absent entirely) is not delegated and is skipped.
-//  3. Follow the CNAME target with CNAMEChain; if the target is NXDOMAIN the ESP
-//     resource is gone and the selector is reclaimable.
-//  4. Emit a VectorDKIM finding with Confidence=Confirmed when the CNAME target
-//     is NXDOMAIN (definitively dangling).
+//  2. Resolve its CNAME (resolver.RawCNAME).
+//     a. If the selector is delegated via CNAME, follow the target with
+//     CNAMEChain; if the target is NXDOMAIN the ESP resource is gone and the
+//     selector is reclaimable — emit a Confidence=Confirmed VectorDKIM
+//     finding (the original Rank 6 dangling-CNAME case).
+//     b. If the selector is NOT delegated, look up its TXT record and parse the
+//     inline DKIM key. If the published RSA public key is below the RFC 8301
+//     1024-bit floor (minDKIMKeyBits), emit a Confidence=Likely VectorDKIM
+//     finding carrying DKIMKeyBits — a short key can be factored to recover
+//     the private key and forge DKIM-passing mail.
 //
-// selectors overrides DefaultDKIMSelectors when non-empty (the --selectors
-// flag). Each selector is probed independently; one dangling selector does not
-// short-circuit the others.
+// The two cases are mutually exclusive per selector: a selector either delegates
+// via CNAME or publishes a key inline, never both. selectors overrides
+// DefaultDKIMSelectors when non-empty (the --selectors flag). Each selector is
+// probed independently; one finding does not short-circuit the others.
 func DKIM(ctx context.Context, target string, r *resolver.Resolver, selectors []string) ([]finding.Finding, error) {
 	if len(selectors) == 0 {
 		selectors = DefaultDKIMSelectors
@@ -65,27 +87,150 @@ func DKIM(ctx context.Context, target string, r *resolver.Resolver, selectors []
 		host := sel + "._domainkey." + target
 
 		cname, err := r.RawCNAME(ctx, host)
-		if err != nil || cname == "" {
-			// No CNAME at this selector (inline TXT key, absent record, or the
-			// _domainkey label itself is NXDOMAIN with no alias) → not delegated,
-			// nothing to take over.
+		if err == nil && cname != "" {
+			// The selector delegates via CNAME. Check whether the delegated
+			// target still exists. NXDOMAIN means the ESP resource is gone and
+			// reclaimable.
+			_, chainErr := r.CNAMEChain(ctx, cname)
+			if errors.Is(chainErr, resolver.ErrNXDomain) {
+				findings = append(findings, finding.Finding{
+					Subdomain:    host,
+					Vector:       finding.VectorDKIM,
+					Confidence:   finding.Confirmed,
+					CNAME:        cname,
+					DKIMSelector: sel,
+					Evidence:     "DKIM selector CNAME target is NXDOMAIN — ESP resource reclaimable",
+				})
+			}
 			continue
 		}
 
-		// The selector delegates via CNAME. Check whether the delegated target
-		// still exists. NXDOMAIN means the ESP resource is gone and reclaimable.
-		_, chainErr := r.CNAMEChain(ctx, cname)
-		if errors.Is(chainErr, resolver.ErrNXDomain) {
-			findings = append(findings, finding.Finding{
-				Subdomain:    host,
-				Vector:       finding.VectorDKIM,
-				Confidence:   finding.Confirmed,
-				CNAME:        cname,
-				DKIMSelector: sel,
-				Evidence:     "DKIM selector CNAME target is NXDOMAIN — ESP resource reclaimable",
-			})
+		// Not delegated via CNAME. The selector may publish a DKIM key inline as
+		// a TXT record. Fetch it and check the RSA modulus size: a key below the
+		// RFC 8301 floor is factorable and lets an attacker forge signatures.
+		txts, txtErr := r.TXT(ctx, host)
+		if txtErr != nil || len(txts) == 0 {
+			continue
 		}
+		bits, ok := weakDKIMKeyBits(txts)
+		if !ok {
+			continue
+		}
+		findings = append(findings, finding.Finding{
+			Subdomain:    host,
+			Vector:       finding.VectorDKIM,
+			Confidence:   finding.Likely,
+			DKIMSelector: sel,
+			DKIMKeyBits:  bits,
+			Evidence: fmt.Sprintf(
+				"DKIM selector publishes a %d-bit RSA key (below the RFC 8301 %d-bit floor) — factorable, forgeable signatures",
+				bits, minDKIMKeyBits),
+		})
 	}
 
 	return findings, nil
+}
+
+// weakDKIMKeyBits inspects the TXT records published at a DKIM selector and
+// reports the RSA modulus size when it is below minDKIMKeyBits. The bool result
+// is true only for a parsed RSA key that is genuinely too short; it is false for
+// a non-DKIM record, a revoked key (empty p=), a non-RSA key type, a key that
+// meets the floor, or any record that cannot be parsed (graverobber never
+// reports a finding it cannot substantiate).
+//
+// A DKIM key record is a TXT value of semicolon-separated tag=value pairs, e.g.
+//
+//	v=DKIM1; k=rsa; p=<base64 SubjectPublicKeyInfo or PKCS#1 public key>
+//
+// The p= value is the base64-encoded public key. Per RFC 6376 the key is a
+// DER-encoded SubjectPublicKeyInfo (X.509), though some signers emit a bare
+// PKCS#1 RSAPublicKey; weakDKIMKeyBits accepts either.
+func weakDKIMKeyBits(txts []string) (int, bool) {
+	for _, txt := range txts {
+		tags := parseDKIMTags(txt)
+		// A DKIM key record either carries v=DKIM1 or, very commonly, omits v=
+		// and is identified by the presence of p=. Require a p= tag; if v= is
+		// present it must say DKIM1 (case-insensitive) to avoid misreading an
+		// unrelated TXT record that happens to contain a "p=" substring.
+		p, hasP := tags["p"]
+		if !hasP {
+			continue
+		}
+		if v, hasV := tags["v"]; hasV && !strings.EqualFold(v, "DKIM1") {
+			continue
+		}
+		// k= defaults to "rsa" when absent (RFC 6376 §3.6.1). Only RSA keys have
+		// a meaningful modulus-size weakness here; ed25519 keys are fixed-size
+		// and out of scope for this check.
+		if k, hasK := tags["k"]; hasK && !strings.EqualFold(k, "rsa") {
+			continue
+		}
+		if p == "" {
+			// Empty p= is an explicitly revoked key, not a weak key.
+			continue
+		}
+		bits, ok := rsaPublicKeyBits(p)
+		if !ok {
+			continue
+		}
+		if bits < minDKIMKeyBits {
+			return bits, true
+		}
+	}
+	return 0, false
+}
+
+// parseDKIMTags splits a DKIM TXT record into its tag=value map. Tag names are
+// lower-cased; whitespace around tags and values is trimmed. Values are kept
+// verbatim (base64 in p= must not be altered). A bare tag with no '=' is
+// ignored.
+func parseDKIMTags(txt string) map[string]string {
+	tags := map[string]string{}
+	for _, part := range strings.Split(txt, ";") {
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(kv[0]))
+		if key == "" {
+			continue
+		}
+		// The p= value may legitimately contain internal whitespace (folded
+		// base64); strip all whitespace so base64 decoding succeeds.
+		val := strings.TrimSpace(kv[1])
+		if key == "p" {
+			val = strings.Join(strings.Fields(val), "")
+		}
+		tags[key] = val
+	}
+	return tags
+}
+
+// rsaPublicKeyBits base64-decodes a DKIM p= value and returns the RSA modulus
+// bit length. It accepts both the RFC 6376 DER SubjectPublicKeyInfo encoding
+// (the common case) and a bare PKCS#1 RSAPublicKey. The bool is false when the
+// value is not valid base64, not a parseable RSA public key, or not RSA.
+func rsaPublicKeyBits(p string) (int, bool) {
+	der, err := base64.StdEncoding.DecodeString(p)
+	if err != nil {
+		// Some records use base64 without padding; try the raw encoding too.
+		der, err = base64.RawStdEncoding.DecodeString(p)
+		if err != nil {
+			return 0, false
+		}
+	}
+
+	if pub, err := x509.ParsePKIXPublicKey(der); err == nil {
+		if rsaPub, ok := pub.(*rsa.PublicKey); ok {
+			return rsaPub.N.BitLen(), true
+		}
+		return 0, false // parsed, but not an RSA key (e.g. ed25519)
+	}
+
+	// Fall back to a bare PKCS#1 RSAPublicKey, which some signers publish.
+	if rsaPub, err := x509.ParsePKCS1PublicKey(der); err == nil {
+		return rsaPub.N.BitLen(), true
+	}
+
+	return 0, false
 }

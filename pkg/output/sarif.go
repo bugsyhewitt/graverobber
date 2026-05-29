@@ -137,9 +137,9 @@ var vectorRuleText = map[finding.Vector]struct {
 		"The domain's MX record points at a mail host that is NXDOMAIN or whose cloud hosted-zone is deleted; an attacker who claims it receives inbound mail including password resets and 2FA codes.",
 	},
 	finding.VectorDKIM: {
-		"Dangling DKIM selector takeover",
-		"A DKIM selector CNAME points at a dead ESP resource.",
-		"A DKIM selector is published as a CNAME whose target is NXDOMAIN; an attacker who reclaims the ESP resource can serve a DKIM key that signs spoofed mail.",
+		"DKIM selector weakness",
+		"A DKIM selector is reclaimable (dangling CNAME) or publishes a weak RSA key.",
+		"A DKIM selector is either published as a CNAME whose target is NXDOMAIN (an attacker who reclaims the ESP resource can serve a DKIM key that signs spoofed mail) or publishes an inline RSA key below the RFC 8301 1024-bit floor (an attacker who factors the short key can forge DKIM-passing signatures directly). Either way the attacker can sign mail that passes DKIM for the domain.",
 	},
 	finding.VectorDMARC: {
 		"Dangling DMARC report domain takeover",
@@ -241,7 +241,10 @@ func sarifMessage(f finding.Finding) string {
 			detail = fmt.Sprintf("MX %v", f.MXHosts)
 		}
 	case finding.VectorDKIM:
-		if f.DKIMSelector != "" {
+		switch {
+		case f.DKIMKeyBits > 0:
+			detail = fmt.Sprintf("DKIM %s._domainkey weak %d-bit RSA key", f.DKIMSelector, f.DKIMKeyBits)
+		case f.DKIMSelector != "":
 			detail = fmt.Sprintf("DKIM %s._domainkey -> %s", f.DKIMSelector, f.CNAME)
 		}
 	case finding.VectorDMARC:
