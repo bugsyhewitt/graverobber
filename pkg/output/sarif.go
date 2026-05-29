@@ -161,6 +161,11 @@ var vectorRuleText = map[finding.Vector]struct {
 		"A DANE TLSA record pins a mail host that is NXDOMAIN.",
 		"A DANE TLSA record (RFC 6698 / RFC 7672) at _25._tcp.<mxhost> pins the TLS certificate of a mail exchanger that is NXDOMAIN. Because DANE for SMTP mandates DNSSEC the stale pin is authenticated: it hard-fails inbound mail from every DANE-validating sender, and an attacker who reclaims the gone mail host can present a certificate matching the published association to be trusted by DANE senders — a DANE-blessed mail-interception path.",
 	},
+	finding.VectorMTASTS: {
+		"Dangling MTA-STS policy host",
+		"An MTA-STS policy is advertised but its policy host is NXDOMAIN.",
+		"A domain advertises SMTP MTA-STS (RFC 8461) via a \"v=STSv1\" TXT record at _mta-sts.<domain>, but its policy host mta-sts.<domain> — which serves the policy file at https://mta-sts.<domain>/.well-known/mta-sts.txt — is NXDOMAIN. An attacker who reclaims the dangling policy host can serve a forged policy that disables TLS enforcement (mode: none) or authorises an attacker-controlled MX, re-opening the active TLS-downgrade and mail-redirection attacks MTA-STS exists to close.",
+	},
 }
 
 // ruleForVector builds the SARIF rule descriptor for a vector. Unknown vectors
@@ -283,6 +288,8 @@ func sarifMessage(f finding.Finding) string {
 		} else {
 			detail = "DANE TLSA " + f.TLSAName + " dangling pin"
 		}
+	case finding.VectorMTASTS:
+		detail = fmt.Sprintf("MTA-STS policy host %s is NXDOMAIN (dangling — reclaimable target %s)", f.Service, f.CNAME)
 	}
 	msg := fmt.Sprintf("[%s] %s takeover candidate on %s", f.Confidence, f.Vector, f.Subdomain)
 	if detail != "" {

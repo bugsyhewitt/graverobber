@@ -142,6 +142,8 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		} else {
 			detail = fmt.Sprintf("tlsa %s dangling DANE pin", f.TLSAName)
 		}
+	case finding.VectorMTASTS:
+		detail = fmt.Sprintf("mta-sts policy host %s NXDOMAIN (dangling -> %s)", f.Service, f.CNAME)
 	}
 
 	_, err := fmt.Fprintf(t.w, "[%s] [%s] %s  %s\n",

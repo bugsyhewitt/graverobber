@@ -75,6 +75,15 @@ const (
 	// TLSAName field carries the DANE-prefixed owner name (e.g.
 	// "_25._tcp.mx.example.com") and MXHosts carries the dangling mail host.
 	VectorTLSA Vector = "tlsa"
+	// VectorMTASTS: a domain advertises SMTP MTA-STS (RFC 8461) via a TXT policy
+	// signal at _mta-sts.<domain> but its policy host mta-sts.<domain> — where the
+	// policy file is served over HTTPS — is NXDOMAIN, a dangling MTA-STS host. An
+	// attacker who reclaims the gone host can serve a forged policy ("mode: none"
+	// to disable TLS enforcement, or an attacker-controlled "mx:" list to steer
+	// inbound mail), defeating the downgrade protection MTA-STS exists to provide.
+	// The dangling policy host is carried in Service and the claimable CNAME
+	// target (or the policy host itself) in CNAME.
+	VectorMTASTS Vector = "mtasts"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.
