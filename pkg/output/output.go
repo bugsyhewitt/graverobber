@@ -117,7 +117,10 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 			detail = fmt.Sprintf("dkim %s._domainkey -> %s", f.DKIMSelector, f.CNAME)
 		}
 	case finding.VectorDMARC:
-		if f.DMARCURI != "" {
+		switch {
+		case f.DMARCPolicy != "":
+			detail = fmt.Sprintf("dmarc policy p=%s (monitor-only)", f.DMARCPolicy)
+		case f.DMARCURI != "":
 			detail = fmt.Sprintf("dmarc rua/ruf:%s", f.DMARCURI)
 		}
 	case finding.VectorAXFR:

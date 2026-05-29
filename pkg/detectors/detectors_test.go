@@ -924,12 +924,14 @@ func TestDMARC_DanglingReportDomainPotential(t *testing.T) {
 }
 
 // TestDMARC_LiveReportDomainNoFinding verifies that a report domain which
-// resolves (exists) produces no finding.
+// resolves (exists) produces no finding. The policy is p=reject so that the
+// (separately tested) weak-policy sub-case does not fire — this test isolates
+// the dangling-report-domain path.
 func TestDMARC_LiveReportDomainNoFinding(t *testing.T) {
 	const target = "example.com"
 	// nxDomain is some unrelated name; the report domain "live.example.net"
 	// is not it, so the server returns NOERROR for it → exists → no finding.
-	record := "v=DMARC1; p=none; rua=mailto:a@live.example.net"
+	record := "v=DMARC1; p=reject; rua=mailto:a@live.example.net"
 
 	addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
 	defer cleanup()
@@ -944,6 +946,164 @@ func TestDMARC_LiveReportDomainNoFinding(t *testing.T) {
 	}
 	if len(findings) != 0 {
 		t.Errorf("expected no findings for live report domain, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestDMARCPolicy unit-tests the p= tag parser across enforcement levels,
+// case-insensitivity, tag ordering, and absence.
+func TestDMARCPolicy(t *testing.T) {
+	cases := []struct {
+		record string
+		want   string
+	}{
+		{"v=DMARC1; p=none", "none"},
+		{"v=DMARC1; p=reject; rua=mailto:r@x.net", "reject"},
+		{"v=DMARC1; p=quarantine; pct=50", "quarantine"},
+		{"v=DMARC1; P=None", "none"},                     // case-insensitive tag + value
+		{"v=DMARC1; rua=mailto:r@x.net; p=none", "none"}, // p= not first
+		{"v=DMARC1; sp=none; p=reject", "reject"},        // sp= must not shadow p=
+		{"v=DMARC1; rua=mailto:r@x.net", ""},             // no p= tag
+		{"v=DMARC1;p=none ", "none"},                     // no space after ; , trailing space
+		{"v=spf1 include:a.com -all", ""},                // not a DMARC record
+	}
+	for _, c := range cases {
+		if got := dmarcPolicy(c.record); got != c.want {
+			t.Errorf("dmarcPolicy(%q) = %q, want %q", c.record, got, c.want)
+		}
+	}
+}
+
+// TestDMARC_WeakPolicyPotential drives the full detector: a p=none policy whose
+// report domains all resolve must yield exactly one Potential weak-policy
+// finding keyed on the target, carrying the policy in DMARCPolicy (not DMARCURI).
+func TestDMARC_WeakPolicyPotential(t *testing.T) {
+	const target = "example.com"
+	// rua points at a live domain so the dangling-report sub-case yields nothing;
+	// the only finding must be the weak policy itself.
+	record := "v=DMARC1; p=none; rua=mailto:a@live.example.net"
+
+	addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Vector != finding.VectorDMARC {
+		t.Errorf("vector: got %q, want dmarc", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("confidence: got %q, want POTENTIAL", f.Confidence)
+	}
+	if f.DMARCPolicy != "none" {
+		t.Errorf("dmarc_policy: got %q, want none", f.DMARCPolicy)
+	}
+	if f.DMARCURI != "" {
+		t.Errorf("dmarc_uri: got %q, want empty for the weak-policy sub-case", f.DMARCURI)
+	}
+	if f.Subdomain != target {
+		t.Errorf("subdomain: got %q, want %q (weak policy is keyed on the target)", f.Subdomain, target)
+	}
+}
+
+// TestDMARC_WeakPolicyNoReportingEvidence verifies the evidence string calls out
+// the worse case: p=none with no rua= aggregate reporting (no enforcement AND no
+// visibility).
+func TestDMARC_WeakPolicyNoReportingEvidence(t *testing.T) {
+	const target = "example.com"
+	record := "v=DMARC1; p=none" // no rua=
+
+	addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].Evidence, "no rua=") {
+		t.Errorf("evidence %q does not call out the missing aggregate reporting", findings[0].Evidence)
+	}
+}
+
+// TestDMARC_StrongPolicyNoWeakFinding verifies that p=reject and p=quarantine
+// (enforcing policies) never produce a weak-policy finding.
+func TestDMARC_StrongPolicyNoWeakFinding(t *testing.T) {
+	for _, policy := range []string{"reject", "quarantine"} {
+		const target = "example.com"
+		record := "v=DMARC1; p=" + policy + "; rua=mailto:a@live.example.net"
+
+		addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
+
+		r := resolver.New([]string{addr}, 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+		findings, err := DMARC(ctx, target, r)
+		cancel()
+		cleanup()
+		if err != nil {
+			t.Fatalf("DMARC(p=%s): %v", policy, err)
+		}
+		if len(findings) != 0 {
+			t.Errorf("p=%s: expected no findings, got %d: %+v", policy, len(findings), findings)
+		}
+	}
+}
+
+// TestDMARC_WeakPolicyAndDanglingReport verifies both sub-cases fire together
+// when a p=none policy also names an NXDOMAIN report domain: one weak-policy
+// finding (keyed on the target) plus one dangling-report finding (keyed on the
+// claimable domain).
+func TestDMARC_WeakPolicyAndDanglingReport(t *testing.T) {
+	const (
+		target       = "example.com"
+		reportDomain = "reports.deleted-vendor.invalid"
+	)
+	record := "v=DMARC1; p=none; rua=mailto:agg@" + reportDomain
+
+	addr, cleanup := dmarcDNSServer(t, target, record, reportDomain)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("expected exactly 2 findings, got %d: %+v", len(findings), findings)
+	}
+
+	var sawWeak, sawDangling bool
+	for _, f := range findings {
+		switch {
+		case f.DMARCPolicy == "none" && f.Subdomain == target && f.DMARCURI == "":
+			sawWeak = true
+		case f.DMARCURI == reportDomain && f.Subdomain == reportDomain && f.DMARCPolicy == "":
+			sawDangling = true
+		}
+	}
+	if !sawWeak {
+		t.Errorf("missing weak-policy finding in %+v", findings)
+	}
+	if !sawDangling {
+		t.Errorf("missing dangling-report finding in %+v", findings)
 	}
 }
 
