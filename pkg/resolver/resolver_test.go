@@ -647,3 +647,108 @@ func TestZoneTransfer_TransportErrorIsNotRefusal(t *testing.T) {
 		t.Errorf("a transport failure must not be reported as ErrAXFRRefused: %v", err)
 	}
 }
+
+// TestCAA_ParsesRecords verifies CAA returns the published CAA record set with
+// tags lower-cased, and that a non-Success rcode yields nil without error.
+func TestCAA_ParsesRecords(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			name := dns.Fqdn("target.example.com")
+			resp.Answer = []dns.RR{
+				&dns.CAA{
+					Hdr:   dns.RR_Header{Name: name, Rrtype: dns.TypeCAA, Class: dns.ClassINET, Ttl: 300},
+					Flag:  0,
+					Tag:   "ISSUE", // upper-case on the wire; resolver must lower-case
+					Value: "letsencrypt.org",
+				},
+				&dns.CAA{
+					Hdr:   dns.RR_Header{Name: name, Rrtype: dns.TypeCAA, Class: dns.ClassINET, Ttl: 300},
+					Flag:  128,
+					Tag:   "iodef",
+					Value: "mailto:sec@example.com",
+				},
+			}
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	r := New([]string{pc.LocalAddr().String()}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := r.CAA(ctx, "target.example.com")
+	if err != nil {
+		t.Fatalf("CAA: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 CAA records, got %d: %+v", len(got), got)
+	}
+	if got[0].Tag != "issue" {
+		t.Errorf("tag[0]: got %q, want lower-cased %q", got[0].Tag, "issue")
+	}
+	if got[0].Value != "letsencrypt.org" {
+		t.Errorf("value[0]: got %q, want %q", got[0].Value, "letsencrypt.org")
+	}
+	if got[1].Flag != 128 {
+		t.Errorf("flag[1]: got %d, want 128 (critical)", got[1].Flag)
+	}
+}
+
+// TestCAA_EmptyOnNXDOMAIN verifies CAA returns nil (not an error) on a
+// non-Success rcode, mirroring MX/TXT.
+func TestCAA_EmptyOnNXDOMAIN(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			resp.Rcode = dns.RcodeNameError
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	r := New([]string{pc.LocalAddr().String()}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := r.CAA(ctx, "gone.example.com")
+	if err != nil {
+		t.Fatalf("CAA returned error on NXDOMAIN, want nil: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil records on NXDOMAIN, got %+v", got)
+	}
+}

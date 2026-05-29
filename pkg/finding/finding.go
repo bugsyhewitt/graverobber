@@ -48,6 +48,16 @@ const (
 	// transfer (AXFR), leaking every record in the zone to any client. It is a
 	// direct information disclosure and a force-multiplier for the other vectors.
 	VectorAXFR Vector = "axfr"
+	// VectorCAA: a domain's CAA (Certification Authority Authorization, RFC 8659)
+	// record set is misconfigured. In the dangling sub-case an issue/issuewild
+	// tag names a CA domain that is NXDOMAIN — an attacker who registers that
+	// domain controls a CA the policy authorises to issue certificates for the
+	// target (the CAAIssuer field carries the claimable domain). In the
+	// permissive sub-case a CAA record set exists but explicitly authorises ANY
+	// CA to issue (an issue/issuewild tag whose value is "*"), defeating the
+	// purpose of publishing CAA at all. The two sub-cases are distinguished by
+	// whether CAAIssuer is set.
+	VectorCAA Vector = "caa"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.
@@ -145,6 +155,11 @@ type Finding struct {
 	// It is empty for the dangling-report-domain sub-case, which is identified
 	// instead by the DMARCURI field.
 	DMARCPolicy string `json:"dmarc_policy,omitempty"`
+	// CAAIssuer is set for the dangling-issuer VectorCAA sub-case: the claimable
+	// CA domain named by an issue=/issuewild= tag whose host is NXDOMAIN. It is
+	// empty for the permissive-CAA sub-case (a "*" wildcard authorising any CA),
+	// which is identified instead by the Evidence string.
+	CAAIssuer string `json:"caa_issuer,omitempty"`
 	// LeakedHosts is set for VectorAXFR findings: a deduplicated, sorted sample
 	// of the owner names exposed by the zone transfer (capped; the full zone is
 	// not serialised). For VectorAXFR, the leaking nameserver is in Service and

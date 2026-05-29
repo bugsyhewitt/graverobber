@@ -127,6 +127,12 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		if f.Service != "" {
 			detail = fmt.Sprintf("axfr %s leaked %d host(s)", f.Service, len(f.LeakedHosts))
 		}
+	case finding.VectorCAA:
+		if f.CAAIssuer != "" {
+			detail = fmt.Sprintf("caa issuer %s NXDOMAIN (claimable)", f.CAAIssuer)
+		} else {
+			detail = "caa authorises any CA (permissive)"
+		}
 	}
 
 	_, err := fmt.Fprintf(t.w, "[%s] [%s] %s  %s\n",

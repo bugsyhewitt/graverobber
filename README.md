@@ -1,14 +1,14 @@
 # graverobber
 
-**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer misconfiguration.**
+**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer and CAA misconfiguration.**
 
 > Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, DKIM,
 > and DMARC takeover detection plus unauthenticated AXFR zone-transfer discovery
-> in one pipeline-friendly Go binary.
+> and CAA misconfiguration in one pipeline-friendly Go binary.
 
 `graverobber` is the only maintained Go binary that covers **CNAME**, **NS**,
 **SPF**, **MX**, **DKIM**, and **DMARC** takeover vectors plus **AXFR**
-zone-transfer misconfiguration in a single tool. It is a static binary with no
+zone-transfer and **CAA** misconfiguration in a single tool. It is a static binary with no
 runtime, reads targets from stdin/file/flag, streams JSONL, and uses the
 exit-code conventions of the `httpx`/`subfinder` family so it drops straight into
 a recon pipeline.
@@ -26,12 +26,15 @@ a recon pipeline.
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, **or** publishes an inline RSA key below the RFC 8301 1024-bit floor | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012) |
 | DMARC | A `_dmarc` policy is monitor-only (`p=none`, spoofable) **or** its `rua=`/`ruf=` report domain is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon; `p=none` spoofing (BEC/phishing precondition) |
 | AXFR  | A delegated nameserver allows an unauthenticated zone transfer, leaking every record | Classic DNS misconfiguration; force-multiplier for every other vector |
+| CAA   | A `CAA` record names a CA domain that is NXDOMAIN and re-claimable, **or** uses the `*` wildcard authorising any CA to issue | Missing/weak certificate-issuance control → man-in-the-middle TLS |
 
 Most scanners cover CNAME only. NS, SPF, MX, DKIM, and DMARC takeover are live,
 actively-exploited vectors that almost no Go tool handles. Together SPF, DKIM,
 MX, and DMARC cover the complete email-authentication takeover surface. AXFR adds
 the classic zone-transfer leak: a single misconfigured nameserver hands an
-attacker the full subdomain list to feed back through every other vector.
+attacker the full subdomain list to feed back through every other vector. CAA
+adds the certificate-issuance control: a domain that names a claimable CA — or
+explicitly authorises any CA — re-opens the door to fraudulent TLS certificates.
 
 ---
 
@@ -75,7 +78,7 @@ graverobber -l subs.txt --fingerprints ~/private.json
 graverobber -l subs.txt --offline
 
 # Skip vectors
-graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr
+graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa
 
 # Probe a custom set of DKIM selectors instead of the built-in ESP defaults
 graverobber -l subs.txt --selectors default,google,s1,s2,k1
@@ -226,6 +229,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME + weak inline RSA key) |
 | `--no-dmarc` | false | Skip DMARC report-domain dangling checks |
 | `--no-axfr` | false | Skip AXFR zone-transfer misconfiguration checks |
+| `--no-caa` | false | Skip CAA (Certification Authority Authorization) misconfiguration checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
 | `--offline` | false | Cached/embedded fingerprints only, no network |
@@ -398,6 +402,38 @@ zone data yields a `CONFIRMED` `axfr` finding naming that nameserver, the number
 of records leaked, and a capped sample of the exposed hostnames (`leaked_hosts`).
 graverobber only reads the zone to confirm and sample the leak — it never writes,
 modifies, or persists the transferred records.
+
+### CAA misconfiguration (`--no-caa`)
+
+A `CAA` (Certification Authority Authorization, RFC 8659) record set restricts
+which Certificate Authorities may issue certificates for a domain. Without it,
+**any** of the ~150 publicly-trusted CAs will issue a certificate to anyone who
+passes that CA's domain-control validation — the precondition for a
+man-in-the-middle TLS certificate. CAA closes that hole by naming the only CAs
+allowed to issue:
+
+```
+example.com.  CAA  0 issue "letsencrypt.org"      ; only Let's Encrypt for end-entity certs
+example.com.  CAA  0 issuewild ";"                ; no CA may issue wildcard certs
+```
+
+graverobber resolves the target's `CAA` records and flags two misconfigurations,
+both `POTENTIAL` (DNS-only signals, no fingerprint match):
+
+- **Dangling issuer** — an `issue`/`issuewild` tag names a CA domain that is
+  **NXDOMAIN**. This is the SubdoMailing-class takeover applied to CAA: an
+  attacker who registers the unregistered CA domain can stand up an ACME/CA
+  endpoint that the target's own policy explicitly authorises to issue
+  certificates. The claimable domain is reported in `caa_issuer`.
+- **Permissive any-CA** — a CAA record set is present but an `issue`/`issuewild`
+  tag uses the wildcard value `*`, authorising **any** CA to issue. Publishing
+  CAA and then naming `*` re-opens the very hole CAA exists to close while
+  falsely signalling that issuance is controlled.
+
+A domain with **no** CAA record at all is the permissive internet-wide default
+and is intentionally **not** flagged, to keep the vector low-noise and
+pipeline-friendly — only a present-but-broken policy is reported. The secure
+deny-all `;` value is likewise never flagged.
 
 ---
 

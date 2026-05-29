@@ -151,6 +151,11 @@ var vectorRuleText = map[finding.Vector]struct {
 		"A nameserver allows unauthenticated AXFR.",
 		"A delegated nameserver streams the full zone to any client over AXFR, leaking every subdomain, internal hostname, and infrastructure record — a direct information disclosure and a force-multiplier for the other takeover vectors.",
 	},
+	finding.VectorCAA: {
+		"CAA misconfiguration",
+		"A CAA record names a claimable CA domain or authorises any CA.",
+		"A CAA (Certification Authority Authorization, RFC 8659) record set is misconfigured: an issue/issuewild tag either names a CA domain that is NXDOMAIN (an attacker who registers it can stand up a CA the policy authorises to issue certificates for the domain) or uses the wildcard \"*\" value that authorises any CA to issue — re-opening the man-in-the-middle TLS exposure CAA exists to close.",
+	},
 }
 
 // ruleForVector builds the SARIF rule descriptor for a vector. Unknown vectors
@@ -257,6 +262,12 @@ func sarifMessage(f finding.Finding) string {
 	case finding.VectorAXFR:
 		if f.Service != "" {
 			detail = fmt.Sprintf("AXFR %s leaked %d host(s)", f.Service, len(f.LeakedHosts))
+		}
+	case finding.VectorCAA:
+		if f.CAAIssuer != "" {
+			detail = "CAA issuer " + f.CAAIssuer + " is NXDOMAIN (claimable)"
+		} else {
+			detail = "CAA authorises any CA (permissive)"
 		}
 	}
 	msg := fmt.Sprintf("[%s] %s takeover candidate on %s", f.Confidence, f.Vector, f.Subdomain)

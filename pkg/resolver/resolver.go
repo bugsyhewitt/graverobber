@@ -389,6 +389,44 @@ func (r *Resolver) TXT(ctx context.Context, host string) ([]string, error) {
 	return out, nil
 }
 
+// CAARecord is a single CAA (Certification Authority Authorization) resource
+// record (RFC 8659). A CAA record set restricts which Certificate Authorities
+// may issue certificates for a domain. The fields mirror the wire format:
+//
+//	Flag  a bit field; bit 0 (value 128) is the "critical" flag.
+//	Tag   the property tag, lower-cased: "issue", "issuewild", or "iodef".
+//	Value the property value: a CA domain (optionally with parameters) for
+//	      issue/issuewild, or a URL for iodef. A bare ";" forbids all issuance.
+type CAARecord struct {
+	Flag  uint8
+	Tag   string
+	Value string
+}
+
+// CAA returns the CAA records published at host. An empty slice with a nil error
+// means host has no CAA record set (any CA may issue a certificate — the default
+// permissive state). Tags are lower-cased so callers can match them directly.
+func (r *Resolver) CAA(ctx context.Context, host string) ([]CAARecord, error) {
+	resp, err := r.query(ctx, host, dns.TypeCAA)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		return nil, nil
+	}
+	var out []CAARecord
+	for _, rr := range resp.Answer {
+		if c, ok := rr.(*dns.CAA); ok {
+			out = append(out, CAARecord{
+				Flag:  c.Flag,
+				Tag:   strings.ToLower(strings.TrimSpace(c.Tag)),
+				Value: strings.TrimSpace(c.Value),
+			})
+		}
+	}
+	return out, nil
+}
+
 // soaRetries is the number of UDP attempts before escalating to TCP.
 // Transient SERVFAIL and packet loss are common; retrying reduces false
 // negatives without risking false positives (a real deletion returns

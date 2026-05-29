@@ -623,6 +623,63 @@ roadmap updates, five new tests. No API, scanner, or flag change.
 
 ---
 
+## Rank 16 — CAA (Certification Authority Authorization) misconfiguration (eighth vector) — ✅ IMPLEMENTED (Phase 2, Rotation 19)
+
+**Status:** Shipped. Ranks 1–15 covered the seven takeover vectors (CNAME, NS,
+SPF, MX, DKIM, DMARC, AXFR), active verification, the full output story
+(terminal/JSONL/SARIF/CSV + triage summary), and closed the SPF (`redirect=`),
+DKIM (weak inline key), and DMARC (`p=none`) completeness holes. With the
+email-authentication surface complete and the DNS-misconfiguration surface opened
+by AXFR, the next-highest-value gap was a **second DNS-security misconfiguration
+class** that no maintained Go takeover tool covers: a broken CAA policy.
+
+`detectors.CAA` adds `VectorCAA` ("caa") as the eighth vector. A CAA record set
+(RFC 8659) restricts which Certificate Authorities may issue certificates for a
+domain; without one (or with a broken one) any of the ~150 publicly-trusted CAs
+will issue a certificate to anyone who passes its domain-control validation — the
+precondition for a man-in-the-middle TLS certificate. The detector resolves the
+target's CAA records via the new `resolver.CAA` (a `TypeCAA` query returning
+`[]resolver.CAARecord{Flag, Tag, Value}`) and flags two misconfigurations:
+
+- **Dangling issuer** (POTENTIAL): an `issue`/`issuewild` tag names a CA domain
+  that is NXDOMAIN. This is the SubdoMailing-class takeover applied to CAA — an
+  attacker who registers the unregistered CA domain can stand up an ACME/CA
+  endpoint the target's policy explicitly authorises. The claimable domain is
+  carried in the new `CAAIssuer` (`caa_issuer`) field. The NXDOMAIN probe reuses
+  `CNAMEChain`, exactly as the SPF `include:` and DMARC report-domain detectors.
+- **Permissive any-CA** (POTENTIAL): a CAA record set is present but an
+  `issue`/`issuewild` tag uses the wildcard value `*`, re-opening the hole CAA
+  exists to close while falsely signalling that issuance is controlled. `CAAIssuer`
+  is empty; the sub-cases are distinguished by which is set.
+
+Confidence is POTENTIAL (DNS-only, no fingerprint match), consistent with the
+SPF/DMARC classification. A domain with **no** CAA record (the internet-wide
+default) is intentionally NOT flagged, and the secure deny-all `;` value is never
+flagged — the vector reports only a present-but-broken policy, keeping it
+low-noise. Wired into the scanner fan-out behind `Options.NoCAA` / `--no-caa`
+(opt-out, on by default). All four output paths render it: terminal detail
+(`caa issuer <dom> NXDOMAIN (claimable)` / `caa authorises any CA (permissive)`),
+JSONL (`caa_issuer`), SARIF (a `graverobber/caa` rule), and CSV (the claimable CA
+in the `target` column). DNS-only ethos preserved: `miekg/dns` `TypeCAA` only, no
+credentials, no new dependencies.
+
+**Schema:** `finding.VectorCAA = "caa"`; new `CAAIssuer string`
+(`json:"caa_issuer,omitempty"`). `--no-caa` CLI flag; `Options.NoCAA`.
+
+Guarded by `TestCAAIssuerDomain` (table-driven value parser: deny-all/empty/
+params/`*`/case), `TestCAA_DanglingIssuerPotential`,
+`TestCAA_PermissiveAnyCAPotential`, `TestCAA_LiveIssuerNoFinding`,
+`TestCAA_NoRecordNoFinding`, `TestCAAFinding_VectorConstant` (detectors, against a
+hermetic local DNS server), `TestCAA_ParsesRecords`, `TestCAA_EmptyOnNXDOMAIN`
+(resolver), `TestRun_NoCAADisablesCAAVector` (scanner), plus two new CAA cases in
+the table-driven terminal output test.
+
+**Complexity:** Low-medium — one resolver primitive (`CAA` + `CAARecord`), one new
+detector file, two schema additions (`VectorCAA`, `CAAIssuer`), scanner option +
+CLI flag, three output-path arms, README + roadmap updates, eleven new tests.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -658,3 +715,4 @@ roadmap updates, five new tests. No API, scanner, or flag change.
 | 13 | SPF `redirect=` modifier dangling detection ✅ | Low | High (completes SPF coverage, same takeover) | No |
 | 14 | DKIM weak inline-key detection ✅ | Low | High (completes DKIM coverage, forgeable signatures) | Yes (new field, no flag) |
 | 15 | DMARC monitor-only (`p=none`) policy detection ✅ | Low | High (completes DMARC coverage, spoofable domain) | Yes (new field, no flag) |
+| 16 | CAA misconfiguration (8th vector) ✅ | Low-Med | High (new DNS-security surface, MITM TLS) | Yes (new vector + flag) |

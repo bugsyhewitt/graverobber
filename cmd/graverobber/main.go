@@ -79,6 +79,7 @@ type cliFlags struct {
 	noDKIM        bool
 	noDMARC       bool
 	noAXFR        bool
+	noCAA         bool
 	selectors     string
 	fingerprints  []string
 	offline       bool
@@ -96,12 +97,12 @@ func newRootCmd() *cobra.Command {
 
 	root := &cobra.Command{
 		Use:   "graverobber",
-		Short: "Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, DMARC, and AXFR dangling/misconfigured records",
+		Short: "Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, DMARC, AXFR, and CAA dangling/misconfigured records",
 		Long: "graverobber digs up the subdomains your target left for dead.\n" +
 			"It detects CNAME fingerprint, NS zone-deletion, SPF include, MX\n" +
-			"dangling-record, DKIM selector, DMARC report-domain takeover, and\n" +
-			"AXFR zone-transfer misconfiguration across a stream of hosts read\n" +
-			"from stdin, a file, or -t.",
+			"dangling-record, DKIM selector, DMARC report-domain takeover, AXFR\n" +
+			"zone-transfer misconfiguration, and CAA misconfiguration across a\n" +
+			"stream of hosts read from stdin, a file, or -t.",
 		Version: version,
 		Args:    cobra.NoArgs,
 		// The command reports findings via the errFindings sentinel and its
@@ -131,6 +132,7 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVar(&f.noDKIM, "no-dkim", false, "skip DKIM selector dangling-CNAME checks")
 	fl.BoolVar(&f.noDMARC, "no-dmarc", false, "skip DMARC report-domain dangling checks")
 	fl.BoolVar(&f.noAXFR, "no-axfr", false, "skip AXFR zone-transfer misconfiguration checks")
+	fl.BoolVar(&f.noCAA, "no-caa", false, "skip CAA (Certification Authority Authorization) misconfiguration checks")
 	fl.StringVar(&f.selectors, "selectors", "", "comma-separated DKIM selectors to probe (default: common ESP selectors)")
 	fl.StringArrayVar(&f.fingerprints, "fingerprints", nil, "additional fingerprint JSON to merge (repeatable)")
 	fl.BoolVar(&f.offline, "offline", false, "use cached/embedded fingerprints only, no network")
@@ -233,6 +235,7 @@ func runScan(ctx context.Context, f *cliFlags) error {
 		NoDKIM:        f.noDKIM,
 		NoDMARC:       f.noDMARC,
 		NoAXFR:        f.noAXFR,
+		NoCAA:         f.noCAA,
 		HTTPOnly:      f.httpOnly,
 		HTTPSOnly:     f.httpsOnly,
 		Resolvers:     resolvers,
