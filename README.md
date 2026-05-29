@@ -1,14 +1,14 @@
 # graverobber
 
-**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer, CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, dangling BIMI asset hosts, and orphaned DNSSEC DS records.**
+**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer, CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, dangling BIMI asset hosts, orphaned DNSSEC DS records, and dangling TLSRPT report destinations.**
 
 > Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, DKIM,
 > and DMARC takeover detection plus unauthenticated AXFR zone-transfer discovery,
-> CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, dangling BIMI asset hosts, and orphaned DNSSEC DS records in one pipeline-friendly Go binary.
+> CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, dangling BIMI asset hosts, orphaned DNSSEC DS records, and dangling TLSRPT report destinations in one pipeline-friendly Go binary.
 
 `graverobber` is the only maintained Go binary that covers **CNAME**, **NS**,
 **SPF**, **MX**, **DKIM**, and **DMARC** takeover vectors plus **AXFR**
-zone-transfer, **CAA** misconfiguration, dangling **DANE TLSA** pins, dangling **MTA-STS** policy hosts, dangling **BIMI** asset hosts, and orphaned **DNSSEC DS** records in a single tool. It is a static binary with no
+zone-transfer, **CAA** misconfiguration, dangling **DANE TLSA** pins, dangling **MTA-STS** policy hosts, dangling **BIMI** asset hosts, orphaned **DNSSEC DS** records, and dangling **TLSRPT** report destinations in a single tool. It is a static binary with no
 runtime, reads targets from stdin/file/flag, streams JSONL, and uses the
 exit-code conventions of the `httpx`/`subfinder` family so it drops straight into
 a recon pipeline.
@@ -31,6 +31,7 @@ a recon pipeline.
 | MTA-STS | An MTA-STS policy is advertised (`v=STSv1` TXT at `_mta-sts.<domain>`) but the policy host `mta-sts.<domain>` is NXDOMAIN and re-claimable | Reclaimed policy host serves a forged policy (`mode: none` disables TLS enforcement, or an attacker `mx:` list redirects mail) → TLS downgrade / mail interception (RFC 8461) |
 | BIMI | A BIMI record (`v=BIMI1` TXT at `default._bimi.<domain>`) names a logo (`l=`) or VMC (`a=`) URL whose host is NXDOMAIN and re-claimable | Reclaimed asset host serves a forged brand logo/VMC, displayed beside DMARC-passing mail → brand-impersonation phishing (BIMI spec) |
 | DNSSEC | The parent zone publishes a `DS` (Delegation Signer) record but the domain has **no `DNSKEY`** — an orphaned DS that breaks the chain of trust | Every validating resolver (Google, Cloudflare, Quad9, most ISPs) `SERVFAIL`s the whole zone → self-inflicted outage; common after disabling DNSSEC or migrating DNS providers without removing the DS (RFC 4034) |
+| TLSRPT | A TLSRPT record (`v=TLSRPTv1` TXT at `_smtp._tls.<domain>`) names a `rua=` report destination — a `mailto:` domain or `https:` collector host — that is NXDOMAIN and re-claimable | Reclaimed destination intercepts every SMTP-TLS failure report → delivery reconnaissance and a live view of the downgrade failures that would otherwise alert the owner (RFC 8460) |
 
 Most scanners cover CNAME only. NS, SPF, MX, DKIM, and DMARC takeover are live,
 actively-exploited vectors that almost no Go tool handles. Together SPF, DKIM,
@@ -56,6 +57,15 @@ domain dark for the large and growing share of the internet that validates while
 it resolves normally on non-validating resolvers, which makes the outage
 maddening to diagnose. It is not attacker-claimable, but it is a high-severity,
 purely-DNS-detectable misconfiguration an operator urgently needs surfaced.
+TLSRPT completes the SMTP-TLS reporting plane: a domain that advertises TLS
+Reporting but leaves its `rua=` report destination dangling lets an attacker who
+reclaims that mailto domain or HTTPS collector receive every TLS-failure report
+sent for the target — counterparty and infrastructure reconnaissance, and a
+real-time view of the very downgrade failures an active TLS MITM produces, which
+would otherwise be the owner's earliest warning. It is the SMTP-TLS analogue of
+the DMARC report-domain takeover, and together with MTA-STS (policy host) and
+TLSA (DANE pin) it closes graverobber's coverage of the MTA-STS/DANE control
+surface.
 
 ---
 
@@ -99,7 +109,7 @@ graverobber -l subs.txt --fingerprints ~/private.json
 graverobber -l subs.txt --offline
 
 # Skip vectors
-graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa --no-mtasts --no-bimi --no-dnssec
+graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa --no-mtasts --no-bimi --no-dnssec --no-tlsrpt
 
 # Probe a custom set of DKIM selectors instead of the built-in ESP defaults
 graverobber -l subs.txt --selectors default,google,s1,s2,k1
@@ -255,6 +265,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-mtasts` | false | Skip MTA-STS dangling-policy-host checks |
 | `--no-bimi` | false | Skip BIMI dangling-asset-host checks |
 | `--no-dnssec` | false | Skip DNSSEC orphaned-DS (broken chain-of-trust) checks |
+| `--no-tlsrpt` | false | Skip TLSRPT dangling-report-destination checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
 | `--offline` | false | Cached/embedded fingerprints only, no network |
@@ -644,6 +655,48 @@ precisely because the chain is already broken** — is reported as a `POTENTIAL`
 `ds_key_tags` so you know exactly which registrar records to remove (or re-sign
 the zone to match).
 
+### Dangling TLSRPT report destination (`--no-tlsrpt`)
+
+SMTP TLS Reporting (TLSRPT, RFC 8460) is the diagnostic feedback channel for SMTP
+TLS security — the MTA-STS policies and DANE/TLSA pins above. A domain opts in by
+publishing a `TXT` record at `_smtp._tls.<domain>`:
+
+```
+_smtp._tls.example.com.  TXT  "v=TLSRPTv1; rua=mailto:tls-reports@vendor.example,https://collector.vendor.example/v1/tlsrpt"
+```
+
+The `rua=` tag is a comma-separated list of report destinations: a `mailto:`
+address (whose **domain** receives the daily reports) and/or an `https:` collector
+**host**. Whenever a sending MTA fails to negotiate the TLS the recipient's
+MTA-STS policy or DANE pin requires, it emits a report to those destinations
+describing the failure.
+
+In practice the destination is a third-party reporting vendor's mailbox domain or
+HTTPS collector host. When that destination is decommissioned — the vendor domain
+is retired, the hosted zone is deleted, the collector subdomain is removed — but
+the TLSRPT `TXT` record is left behind, you get a **dangling TLSRPT report
+destination**. An attacker who reclaims the gone mailto domain or collector host
+receives **every TLSRPT report sent for the target**:
+
+- The reports enumerate the target's sending counterparties and the IPs and MX
+  hosts involved in delivery — direct infrastructure reconnaissance.
+- More dangerously, they reveal **in real time which senders are failing TLS** to
+  the domain. An attacker mounting an active TLS-downgrade or MITM against the
+  target's inbound mail can watch the very failure reports that would otherwise
+  alert the domain owner — silently confirming and tuning the attack while the
+  owner is blinded.
+
+This is the SMTP-TLS analogue of the DMARC `rua`/`ruf` report-domain takeover.
+
+graverobber resolves `_smtp._tls.<target>`; if a `v=TLSRPTv1` record is present it
+parses the `rua=` destinations and probes each report host (the `mailto:` domain
+or the `https:` URL host). A host that is NXDOMAIN is reported as a `POTENTIAL`
+`tlsrpt` finding keyed on the target, carrying the TLSRPT owner name in `service`
+and the dangling report host in `tlsrpt_uri_host` (destinations naming the same
+host are deduplicated to one finding). A domain that does not advertise TLSRPT, or
+whose report destinations all resolve, is the healthy case and is intentionally
+**not** flagged, keeping the vector low-noise.
+
 ---
 
 ## Confidence model
@@ -673,6 +726,7 @@ JSONL — one finding per line:
 {"subdomain":"example.com","vector":"mtasts","service":"mta-sts.example.com","confidence":"POTENTIAL","cname":"policy.deleted-vendor.invalid","evidence":"MTA-STS policy advertised at _mta-sts.example.com but policy host mta-sts.example.com is NXDOMAIN (dangling MTA-STS host — reclaimable to serve a forged policy that disables TLS enforcement or redirects mail)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"bimi","service":"default._bimi.example.com","confidence":"POTENTIAL","bimi_uri_host":"images.deleted-vendor.invalid","evidence":"BIMI record at default._bimi.example.com l= asset host images.deleted-vendor.invalid is NXDOMAIN (dangling BIMI asset host — reclaimable to serve a forged brand logo/VMC beside DMARC-passing mail)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"dnssec","confidence":"POTENTIAL","ds_key_tags":[12345],"evidence":"parent zone publishes DS record(s) (key tag(s) 12345) but example.com has no DNSKEY — orphaned DS: DNSSEC-validating resolvers (Google, Cloudflare, Quad9, most ISPs) return SERVFAIL for the whole zone (self-inflicted outage; remove the DS at the registrar or re-sign the zone)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"example.com","vector":"tlsrpt","service":"_smtp._tls.example.com","confidence":"POTENTIAL","tlsrpt_uri_host":"reports.deleted-vendor.invalid","evidence":"TLSRPT record at _smtp._tls.example.com rua= report destination host reports.deleted-vendor.invalid is NXDOMAIN (dangling SMTP-TLS report destination — reclaimable to intercept TLS failure reports and mask an active TLS-downgrade attack)","timestamp":"2026-05-28T12:00:00Z"}
 ```
 
 Without `--json`, findings render as one coloured human-readable line per
@@ -683,8 +737,8 @@ failed nameservers (`ns`), the dangling
 mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation or
 weak inline RSA key size (`dkim`), the claimable `rua`/`ruf` report domain
 (`dmarc`), the leaking
-nameserver and leaked-host count (`axfr`), or the orphaned `DS` key tags
-(`dnssec`). ANSI colour is emitted only to a TTY;
+nameserver and leaked-host count (`axfr`), the orphaned `DS` key tags
+(`dnssec`), or the dangling TLSRPT report host (`tlsrpt`). ANSI colour is emitted only to a TTY;
 piped or file output is plain text.
 
 When the scan finishes, the human-readable mode closes with a triage summary on

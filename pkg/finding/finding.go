@@ -111,6 +111,20 @@ const (
 	// removing the DS at the registrar. The orphaned DS key tags are carried in
 	// DSKeyTags and the Evidence string explains the broken chain.
 	VectorDNSSEC Vector = "dnssec"
+	// VectorTLSRPT: a domain advertises SMTP TLS Reporting (TLSRPT, RFC 8460) via
+	// a "v=TLSRPTv1" TXT record at _smtp._tls.<domain> whose rua= report
+	// destination — a mailto: address domain or an https: collector host — is
+	// NXDOMAIN, a dangling report destination. TLSRPT is the feedback channel that
+	// surfaces SMTP TLS-negotiation failures (the failures an attacker mounting a
+	// TLS downgrade against the domain's inbound mail causes); an attacker who
+	// reclaims the gone destination receives every report sent for the target,
+	// gaining delivery-counterparty reconnaissance and a live view of the very
+	// downgrade failures that would otherwise alert the domain owner. This is the
+	// same dangling-report-destination pattern the DMARC rua/ruf vector covers,
+	// applied to the SMTP-TLS reporting plane. The dangling report host is carried
+	// in TLSRPTURIHost and the TLSRPT owner name (e.g. "_smtp._tls.example.com") in
+	// Service.
+	VectorTLSRPT Vector = "tlsrpt"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.
@@ -241,6 +255,12 @@ type Finding struct {
 	// stale delegation-signer records that must be removed at the registrar (or
 	// matched by re-signing the child zone) to repair the broken DNSSEC chain.
 	DSKeyTags []uint16 `json:"ds_key_tags,omitempty"`
+	// TLSRPTURIHost is set for VectorTLSRPT findings: the hostname parsed out of a
+	// TLSRPT rua= report destination (the domain after "@" for a mailto:
+	// destination, or the URL host for an https: destination) whose host is
+	// NXDOMAIN and therefore reclaimable. The TLSRPT owner name is carried in
+	// Service.
+	TLSRPTURIHost string `json:"tlsrpt_uri_host,omitempty"`
 
 	// Scheme records which scheme produced an HTTP-based match: "https" or
 	// "http" (see handoff open question #4).

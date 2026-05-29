@@ -37,6 +37,7 @@ type Options struct {
 	NoMTASTS      bool          // skip the MTA-STS dangling-policy-host vector
 	NoBIMI        bool          // skip the BIMI dangling-asset-host vector
 	NoDNSSEC      bool          // skip the DNSSEC orphaned-DS vector
+	NoTLSRPT      bool          // skip the TLSRPT dangling-report-destination vector
 	HTTPOnly      bool          // probe services over HTTP only
 	HTTPSOnly     bool          // probe services over HTTPS only
 	Resolvers     []string      // custom recursive DNS resolvers
@@ -182,6 +183,9 @@ var (
 	dnssecVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
 		return detectors.DNSSEC(ctx, target, s.resolver)
 	}
+	tlsRptVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.TLSRPT(ctx, target, s.resolver)
+	}
 )
 
 // scanTarget runs the per-target detection pipeline and emits any findings.
@@ -198,7 +202,7 @@ var (
 // as before, so output semantics are unchanged.
 func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.Map, out chan<- finding.Finding) {
 	// Select the enabled vectors. CNAME always runs; NS, SPF, MX, DKIM, DMARC,
-	// AXFR, CAA, TLSA, MTA-STS, and BIMI are opt-out.
+	// AXFR, CAA, TLSA, MTA-STS, BIMI, DNSSEC, and TLSRPT are opt-out.
 	vectors := []vectorFunc{cnameVector}
 	if !s.opts.NoNS {
 		vectors = append(vectors, nsVector)
@@ -232,6 +236,9 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.M
 	}
 	if !s.opts.NoDNSSEC {
 		vectors = append(vectors, dnssecVector)
+	}
+	if !s.opts.NoTLSRPT {
+		vectors = append(vectors, tlsRptVector)
 	}
 
 	// Fan out: run each enabled vector concurrently, collecting findings into a

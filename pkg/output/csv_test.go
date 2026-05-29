@@ -112,6 +112,7 @@ func TestCSV_TargetColumnPerVector(t *testing.T) {
 		{"axfr", finding.Finding{Vector: finding.VectorAXFR, Service: "ns1.example.com", Nameservers: []string{"ns1.example.com"}}, "ns1.example.com"},
 		{"bimi", finding.Finding{Vector: finding.VectorBIMI, Service: "default._bimi.example.com", BIMIURIHost: "images.gone.net"}, "images.gone.net (NXDOMAIN)"},
 		{"dnssec", finding.Finding{Vector: finding.VectorDNSSEC, DSKeyTags: []uint16{12345}}, "orphaned DS key tag 12345 (no child DNSKEY)"},
+		{"tlsrpt", finding.Finding{Vector: finding.VectorTLSRPT, Service: "_smtp._tls.example.com", TLSRPTURIHost: "reports.gone.net"}, "reports.gone.net (NXDOMAIN)"},
 	}
 	ti := colIndex(t, "target")
 	for _, tc := range cases {

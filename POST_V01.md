@@ -994,6 +994,77 @@ updates. No new dependency.
 
 ---
 
+## Rank 22 — TLSRPT dangling-report-destination detection (thirteenth vector) — ✅ IMPLEMENTED (Phase 2, Rotation 28)
+
+**Status:** Shipped. Rotation 28's directive named two candidates — **DKIM selector
+enumeration** or **MTA-STS dangling policy** — as the next DNS/email-security
+vector, with instructions to verify which (if either) was already shipped and, if
+both were, to pick the next best unshipped gap. Assessment found **both directed
+candidates already shipped**:
+
+- **DKIM selector enumeration is already shipped.** `detectors.DKIM` (Ranks 6 +
+  14) probes the `DefaultDKIMSelectors` list (overridable via `--selectors`),
+  emits a `CONFIRMED dkim` finding for a selector whose `_domainkey` CNAME target
+  is NXDOMAIN, and a `LIKELY dkim` finding for a weak inline RSA key below the
+  RFC 8301 1024-bit floor. Re-implementing it would duplicate existing coverage.
+- **MTA-STS dangling policy is already shipped.** `detectors.MTASTS` (the 10th
+  vector) detects an advertised `_mta-sts` TXT signal whose `mta-sts.<domain>`
+  policy host is NXDOMAIN. Re-implementing it would duplicate existing coverage.
+
+Per the directive, the next best unshipped gap was implemented: **SMTP TLS
+Reporting (TLSRPT, RFC 8460) dangling-report-destination detection** as
+`VectorTLSRPT` ("tlsrpt"), the 13th vector. A domain advertises TLSRPT with a
+`v=TLSRPTv1` TXT record at `_smtp._tls.<domain>` carrying a `rua=` tag — a
+comma-separated list of report destinations, each a `mailto:` address (the domain
+after `@` receives the daily SMTP-TLS failure reports) or an `https:` collector
+host. When a report destination is decommissioned but the record is left behind,
+an attacker who reclaims the gone mailto domain or collector host **receives every
+TLSRPT report sent for the target**: delivery-counterparty and infrastructure
+reconnaissance, and — critically — a real-time view of which senders are failing
+TLS to the domain, the exact failures an active TLS-downgrade/MITM against the
+target's inbound mail produces. The owner is blinded to the very alerts that would
+expose the attack. This is the SMTP-TLS analogue of the DMARC `rua`/`ruf`
+report-domain takeover (Rank 8), applied to the TLS-reporting plane, and it closes
+graverobber's coverage of the MTA-STS/DANE control surface (MTA-STS policy host +
+TLSA pin + TLSRPT report destination).
+
+Implemented as a new detector `pkg/detectors/tlsrpt.go` (`TLSRPT`), wired into the
+scanner fan-out behind `Options.NoTLSRPT` / `--no-tlsrpt` (opt-out, on by default),
+mirroring the BIMI/MTA-STS detectors exactly: parse the TXT record, extract each
+report host, probe with `CNAMEChain` (the authoritative NXDOMAIN probe every
+DNS-only vector uses), emit a `POTENTIAL tlsrpt` finding per dangling host (keyed
+on the target, owner name in `Service`, dangling host in the new `TLSRPTURIHost`
+field; destinations naming the same host are deduplicated). `mailto:` domains and
+`https:` URL hosts are both parsed; any other scheme (and a malformed `mailto:`
+with no domain) names no remote host and is skipped, so the detector never probes
+a host it cannot positively identify.
+
+Guarded by 12 new tests in `pkg/detectors/tlsrpt_test.go` (driven by a local-UDP
+DNS harness, integration-first, real DNS round-trips): dangling `mailto:` domain,
+dangling `https:` host, mixed destinations with only the NXDOMAIN one flagged,
+shared-host single-finding dedup, all-live no-finding, no-record no-finding,
+non-TLSRPT TXT ignored, case-insensitive version token, evidence wording, and a
+`tlsRptReportHosts` parser table (mailto/https/malformed-mailto/non-http-scheme/
+no-rua). Plus a scanner opt-out test (`TestRun_NoTLSRPTDisablesTLSRPTVector`), the
+`allEmittableVectors`/`summaryVectorOrder` reconciliation (the Rank 17 lesson), and
+new output cases in the terminal/CSV/SARIF "every vector" regression tables. Full
+suite green, `go vet` clean. README (headline, vector table + prose, `--no-tlsrpt`
+flag, a dedicated TLSRPT section, JSONL example, terminal-detail list), the SARIF
+rule descriptor + result detail, and the CLI `Short`/`Long` help updated.
+
+**Why this over re-implementing a directed candidate:** both directed candidates
+were already shipped (verified in-code), and the directive instructs picking the
+next best unshipped gap in that case. TLSRPT is a genuinely new, exploitable,
+DNS-only signal on the SMTP-TLS reporting plane — the only email-security report
+channel graverobber did not yet cover — completing the MTA-STS/DANE control surface
+and mirroring the DMARC report-domain disposition.
+
+**Complexity:** Low-Med — one new detector, one new vector + field + flag, one
+scanner seam, 12 new tests + reconciliation, README + SARIF + help updates. No new
+dependency.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -1035,3 +1106,4 @@ updates. No new dependency.
 | 19 | DNSSEC orphaned-DS detection (12th vector) ✅ | Low-Med | High (new availability surface, self-inflicted SERVFAIL outage) | Yes (new vector + field + flag) |
 | 20 | CAA `iodef` dangling-report-host detection ✅ | Low | High (completes CAA coverage, report interception) | No (3rd sub-case of `caa`, reuses field + flag) |
 | 21 | SPF `a:`/`mx:` mechanism dangling detection ✅ | Low | High (completes SPF reference coverage, same SubdoMailing takeover) | No (extends `spf`, reuses field + flag) |
+| 22 | TLSRPT dangling-report-destination detection (13th vector) ✅ | Low-Med | High (new SMTP-TLS reporting surface, report interception + downgrade-masking) | Yes (new vector + field + flag) |

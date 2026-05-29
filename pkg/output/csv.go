@@ -159,6 +159,10 @@ func csvTarget(f finding.Finding) string {
 		// The orphaned DS key tags name exactly which registrar records must be
 		// removed (or matched by re-signing) to repair the broken chain.
 		return fmt.Sprintf("orphaned DS %s (no child DNSKEY)", formatKeyTags(f.DSKeyTags))
+	case finding.VectorTLSRPT:
+		// The dangling TLSRPT report host (mailto domain or https collector) is the
+		// actionable target the attacker would reclaim to intercept TLS reports.
+		return fmt.Sprintf("%s (NXDOMAIN)", f.TLSRPTURIHost)
 	default:
 		return ""
 	}
