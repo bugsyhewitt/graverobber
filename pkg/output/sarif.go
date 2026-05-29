@@ -142,9 +142,9 @@ var vectorRuleText = map[finding.Vector]struct {
 		"A DKIM selector is either published as a CNAME whose target is NXDOMAIN (an attacker who reclaims the ESP resource can serve a DKIM key that signs spoofed mail) or publishes an inline RSA key below the RFC 8301 1024-bit floor (an attacker who factors the short key can forge DKIM-passing signatures directly). Either way the attacker can sign mail that passes DKIM for the domain.",
 	},
 	finding.VectorDMARC: {
-		"DMARC policy weakness or dangling report domain",
-		"A DMARC policy is monitor-only (p=none) or names a claimable report domain.",
-		"A DMARC policy is either p=none (monitor-only: receivers take no action on a failed DMARC check, so spoofed mail that fails SPF/DKIM is still delivered — the precondition for business-email-compromise and phishing) or its rua/ruf report URI points at an NXDOMAIN domain (an attacker who claims it intercepts every DMARC aggregate/forensic report sent for the domain).",
+		"DMARC policy weakness or dangling report host",
+		"A DMARC policy is monitor-only (p=none) or names a claimable report host (a mailto: domain or https: collector).",
+		"A DMARC policy is either p=none (monitor-only: receivers take no action on a failed DMARC check, so spoofed mail that fails SPF/DKIM is still delivered — the precondition for business-email-compromise and phishing) or its rua/ruf report URI points at an NXDOMAIN host — a mailto: address domain or an https: collector host, the two transports RFC 7489 §A.5 registers (an attacker who claims it intercepts every DMARC aggregate/forensic report sent for the domain).",
 	},
 	finding.VectorAXFR: {
 		"Unauthenticated DNS zone transfer (AXFR)",

@@ -794,7 +794,7 @@ func TestExtractDMARC(t *testing.T) {
 	}
 }
 
-func TestDMARCReportDomains(t *testing.T) {
+func TestDMARCReportHosts(t *testing.T) {
 	cases := []struct {
 		record string
 		want   []string
@@ -813,6 +813,21 @@ func TestDMARCReportDomains(t *testing.T) {
 			[]string{"reports.example.net"},
 		},
 		{
+			// https: collector host (RFC 7489 §A.5 second transport)
+			"v=DMARC1; p=reject; rua=https://dmarc.collector.example/ingest",
+			[]string{"dmarc.collector.example"},
+		},
+		{
+			// mixed mailto: and https: transports across rua= and ruf=
+			"v=DMARC1; p=none; rua=mailto:a@m.example,https://c.example/in; ruf=https://f.example:8443/forensic",
+			[]string{"m.example", "c.example", "f.example"},
+		},
+		{
+			// https: host upper-cased -> lower-cased; port stripped
+			"v=DMARC1; rua=HTTPS://Collector.Example.NET:443/p",
+			[]string{"collector.example.net"},
+		},
+		{
 			// no reporting tags
 			"v=DMARC1; p=reject; pct=100",
 			nil,
@@ -822,16 +837,48 @@ func TestDMARCReportDomains(t *testing.T) {
 			"v=DMARC1; rua=mailto:not-an-address",
 			nil,
 		},
+		{
+			// unsupported scheme (ftp) is skipped — never probe an unidentifiable host
+			"v=DMARC1; rua=ftp://files.example.net/reports",
+			nil,
+		},
 	}
 	for _, c := range cases {
-		got := dmarcReportDomains(c.record)
+		got := dmarcReportHosts(c.record)
 		if len(got) != len(c.want) {
-			t.Fatalf("dmarcReportDomains(%q) = %v, want %v", c.record, got, c.want)
+			t.Fatalf("dmarcReportHosts(%q) = %v, want %v", c.record, got, c.want)
 		}
 		for i := range got {
 			if got[i] != c.want[i] {
-				t.Errorf("dmarcReportDomains(%q)[%d] = %q, want %q", c.record, i, got[i], c.want[i])
+				t.Errorf("dmarcReportHosts(%q)[%d] = %q, want %q", c.record, i, got[i], c.want[i])
 			}
+		}
+	}
+}
+
+// TestDMARCURIHost unit-tests the single-URI host parser across both registered
+// transports, the size-limit suffix, case-folding, port-stripping, and the
+// skip-on-unidentifiable-host rules.
+func TestDMARCURIHost(t *testing.T) {
+	cases := []struct {
+		uri  string
+		want string
+	}{
+		{"mailto:agg@reports.example.net", "reports.example.net"},
+		{"MAILTO:Agg@Reports.Example.NET!10m", "reports.example.net"},
+		{"https://dmarc.collector.example/ingest", "dmarc.collector.example"},
+		{"HTTPS://Collector.Example.NET:443/p", "collector.example.net"},
+		{"http://plain.example/in", "plain.example"},
+		{"mailto:not-an-address", ""}, // no @
+		{"mailto:trailing@", ""},      // empty domain after @
+		{"ftp://files.example/x", ""}, // unsupported scheme
+		{"https:///no-host", ""},      // no authority
+		{"", ""},                      // empty
+		{"reports.example.net", ""},   // bare host, no scheme — not a DMARC URI
+	}
+	for _, c := range cases {
+		if got := dmarcURIHost(c.uri); got != c.want {
+			t.Errorf("dmarcURIHost(%q) = %q, want %q", c.uri, got, c.want)
 		}
 	}
 }
@@ -946,6 +993,102 @@ func TestDMARC_LiveReportDomainNoFinding(t *testing.T) {
 	}
 	if len(findings) != 0 {
 		t.Errorf("expected no findings for live report domain, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestDMARC_DanglingHTTPSReportHostPotential drives the full detector with a
+// DMARC policy whose rua= names an https: collector host that is NXDOMAIN. The
+// https: transport is the RFC 7489 §A.5 second report transport; a dangling
+// collector host is the same report-interception takeover as the mailto: case.
+func TestDMARC_DanglingHTTPSReportHostPotential(t *testing.T) {
+	const (
+		target     = "example.com"
+		reportHost = "collector.deleted-vendor.invalid"
+	)
+	record := "v=DMARC1; p=reject; rua=https://" + reportHost + "/dmarc/ingest"
+
+	addr, cleanup := dmarcDNSServer(t, target, record, reportHost)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Vector != finding.VectorDMARC {
+		t.Errorf("vector: got %q, want dmarc", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("confidence: got %q, want POTENTIAL", f.Confidence)
+	}
+	if f.DMARCURI != reportHost {
+		t.Errorf("dmarc_uri: got %q, want %q", f.DMARCURI, reportHost)
+	}
+	if f.Subdomain != reportHost {
+		t.Errorf("subdomain: got %q, want %q", f.Subdomain, reportHost)
+	}
+	if !strings.Contains(f.Evidence, "report host") {
+		t.Errorf("evidence does not describe a report host: %q", f.Evidence)
+	}
+}
+
+// TestDMARC_LiveHTTPSReportHostNoFinding verifies that an https: collector host
+// that resolves (exists) produces no finding. p=reject keeps the weak-policy
+// sub-case from firing, isolating the dangling-report-host path.
+func TestDMARC_LiveHTTPSReportHostNoFinding(t *testing.T) {
+	const target = "example.com"
+	record := "v=DMARC1; p=reject; rua=https://live.collector.example.net/in"
+
+	addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings for live https report host, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestDMARC_MixedTransportsOnlyDanglingFlagged drives the full detector with a
+// policy that names both a live mailto: domain and a dangling https: collector
+// host. Only the NXDOMAIN host must be flagged, and exactly once.
+func TestDMARC_MixedTransportsOnlyDanglingFlagged(t *testing.T) {
+	const (
+		target     = "example.com"
+		liveDomain = "live.reports.example.net"
+		reportHost = "gone.collector.invalid"
+	)
+	record := "v=DMARC1; p=reject; rua=mailto:agg@" + liveDomain + ",https://" + reportHost + "/in"
+
+	addr, cleanup := dmarcDNSServer(t, target, record, reportHost)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	if findings[0].DMARCURI != reportHost {
+		t.Errorf("dmarc_uri: got %q, want %q", findings[0].DMARCURI, reportHost)
 	}
 }
 
