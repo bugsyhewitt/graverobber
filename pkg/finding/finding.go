@@ -60,10 +60,14 @@ const (
 	// tag names a CA domain that is NXDOMAIN — an attacker who registers that
 	// domain controls a CA the policy authorises to issue certificates for the
 	// target (the CAAIssuer field carries the claimable domain). In the
+	// dangling-iodef sub-case an iodef= tag names a report URL (mailto: or
+	// http(s)://) whose host is NXDOMAIN — an attacker who registers it intercepts
+	// the CAA violation reports a CA would send (the claimable host is likewise
+	// carried in CAAIssuer; the Evidence string names the iodef tag). In the
 	// permissive sub-case a CAA record set exists but explicitly authorises ANY
 	// CA to issue (an issue/issuewild tag whose value is "*"), defeating the
-	// purpose of publishing CAA at all. The two sub-cases are distinguished by
-	// whether CAAIssuer is set.
+	// purpose of publishing CAA at all. The CAAIssuer field and the Evidence
+	// string together distinguish the sub-cases.
 	VectorCAA Vector = "caa"
 	// VectorTLSA: a domain publishes a DANE TLSA record (RFC 6698 / RFC 7672)
 	// pinning the TLS certificate of a mail exchanger, but the MX host the pin
@@ -210,8 +214,11 @@ type Finding struct {
 	// It is empty for the dangling-report-domain sub-case, which is identified
 	// instead by the DMARCURI field.
 	DMARCPolicy string `json:"dmarc_policy,omitempty"`
-	// CAAIssuer is set for the dangling-issuer VectorCAA sub-case: the claimable
-	// CA domain named by an issue=/issuewild= tag whose host is NXDOMAIN. It is
+	// CAAIssuer is set for the two dangling VectorCAA sub-cases: the claimable
+	// CA domain named by an issue=/issuewild= tag whose host is NXDOMAIN, or the
+	// claimable report host parsed from an iodef= tag's URL (mailto: or http(s)://)
+	// whose host is NXDOMAIN. The Evidence string distinguishes the issuer case
+	// (certificate mis-issuance) from the iodef case (report interception). It is
 	// empty for the permissive-CAA sub-case (a "*" wildcard authorising any CA),
 	// which is identified instead by the Evidence string.
 	CAAIssuer string `json:"caa_issuer,omitempty"`

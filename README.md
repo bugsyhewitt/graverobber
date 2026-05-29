@@ -26,7 +26,7 @@ a recon pipeline.
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, **or** publishes an inline RSA key below the RFC 8301 1024-bit floor | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012) |
 | DMARC | A `_dmarc` policy is monitor-only (`p=none`, spoofable) **or** its `rua=`/`ruf=` report domain is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon; `p=none` spoofing (BEC/phishing precondition) |
 | AXFR  | A delegated nameserver allows an unauthenticated zone transfer, leaking every record | Classic DNS misconfiguration; force-multiplier for every other vector |
-| CAA   | A `CAA` record names a CA domain that is NXDOMAIN and re-claimable, **or** uses the `*` wildcard authorising any CA to issue | Missing/weak certificate-issuance control → man-in-the-middle TLS |
+| CAA   | A `CAA` record names a CA domain that is NXDOMAIN and re-claimable, an `iodef` report host that is NXDOMAIN, **or** uses the `*` wildcard authorising any CA to issue | Missing/weak certificate-issuance control → man-in-the-middle TLS; or CAA report interception |
 | TLSA  | A DANE `TLSA` pin at `_25._tcp.<mxhost>` covers an MX host that is NXDOMAIN — a dangling, DNSSEC-authenticated pin | Hard-fails inbound mail from DANE senders; reclaimable mail host → DANE-trusted interception (RFC 7672) |
 | MTA-STS | An MTA-STS policy is advertised (`v=STSv1` TXT at `_mta-sts.<domain>`) but the policy host `mta-sts.<domain>` is NXDOMAIN and re-claimable | Reclaimed policy host serves a forged policy (`mode: none` disables TLS enforcement, or an attacker `mx:` list redirects mail) → TLS downgrade / mail interception (RFC 8461) |
 | BIMI | A BIMI record (`v=BIMI1` TXT at `default._bimi.<domain>`) names a logo (`l=`) or VMC (`a=`) URL whose host is NXDOMAIN and re-claimable | Reclaimed asset host serves a forged brand logo/VMC, displayed beside DMARC-passing mail → brand-impersonation phishing (BIMI spec) |
@@ -250,7 +250,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME + weak inline RSA key) |
 | `--no-dmarc` | false | Skip DMARC report-domain dangling checks |
 | `--no-axfr` | false | Skip AXFR zone-transfer misconfiguration checks |
-| `--no-caa` | false | Skip CAA (Certification Authority Authorization) misconfiguration checks |
+| `--no-caa` | false | Skip CAA (Certification Authority Authorization) misconfiguration checks (dangling issuer, dangling `iodef` report host, permissive any-CA) |
 | `--no-tlsa` | false | Skip TLSA dangling-DANE-pin checks |
 | `--no-mtasts` | false | Skip MTA-STS dangling-policy-host checks |
 | `--no-bimi` | false | Skip BIMI dangling-asset-host checks |
@@ -461,14 +461,22 @@ example.com.  CAA  0 issue "letsencrypt.org"      ; only Let's Encrypt for end-e
 example.com.  CAA  0 issuewild ";"                ; no CA may issue wildcard certs
 ```
 
-graverobber resolves the target's `CAA` records and flags two misconfigurations,
-both `POTENTIAL` (DNS-only signals, no fingerprint match):
+graverobber resolves the target's `CAA` records and flags three
+misconfigurations, all `POTENTIAL` (DNS-only signals, no fingerprint match):
 
 - **Dangling issuer** — an `issue`/`issuewild` tag names a CA domain that is
   **NXDOMAIN**. This is the SubdoMailing-class takeover applied to CAA: an
   attacker who registers the unregistered CA domain can stand up an ACME/CA
   endpoint that the target's own policy explicitly authorises to issue
   certificates. The claimable domain is reported in `caa_issuer`.
+- **Dangling iodef report host** — an `iodef` tag (RFC 8659 §4.4) names the URL
+  where a CA reports a forbidden issuance request — a `mailto:` address or an
+  `http(s)://` endpoint (RFC 6546). If that URL's host is **NXDOMAIN**, an
+  attacker who registers it intercepts the CAA violation reports, a
+  reconnaissance channel revealing exactly which CAs are being probed against the
+  target's policy (i.e. mis-issuance/attack attempts) — the CAA analogue of the
+  DMARC `rua`/`ruf` report-interception case. The claimable host is reported in
+  `caa_issuer` and the evidence names the `iodef` tag.
 - **Permissive any-CA** — a CAA record set is present but an `issue`/`issuewild`
   tag uses the wildcard value `*`, authorising **any** CA to issue. Publishing
   CAA and then naming `*` re-opens the very hole CAA exists to close while
