@@ -314,9 +314,15 @@ var summaryTierOrder = []finding.Confidence{finding.Confirmed, finding.Likely, f
 
 // summaryVectorOrder fixes the vector columns to the detector pipeline order so
 // the breakdown is stable across runs regardless of which vector emitted first.
+// It MUST list every vector the scanner can emit: summaryParts iterates only
+// over these keys, so a vector missing here is silently dropped from the
+// "by vector:" line even though its findings still count toward the total and
+// the tier breakdown — making the breakdown fail to reconcile. AXFR and CAA
+// were added as vectors (POST_V01 Ranks 12 and 16) without being added here.
 var summaryVectorOrder = []finding.Vector{
 	finding.VectorCNAME, finding.VectorNS, finding.VectorSPF,
 	finding.VectorMX, finding.VectorDKIM, finding.VectorDMARC,
+	finding.VectorAXFR, finding.VectorCAA,
 }
 
 // write renders the summary to w. With no findings it prints the bare count line

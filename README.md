@@ -473,13 +473,15 @@ piped or file output is plain text.
 
 When the scan finishes, the human-readable mode closes with a triage summary on
 stderr: the total count, then a breakdown by confidence tier (strongest first)
-and by vector (pipeline order). Only the tiers and vectors that actually occurred
-are listed, so a single-vector scan stays uncluttered:
+and by vector (pipeline order). The by-vector breakdown covers every vector the
+scanner can emit (`cname`, `ns`, `spf`, `mx`, `dkim`, `dmarc`, `axfr`, `caa`), so
+the per-vector counts always reconcile with the total. Only the tiers and vectors
+that actually occurred are listed, so a single-vector scan stays uncluttered:
 
 ```
 graverobber: 17 finding(s)
-  by tier:   CONFIRMED=3  LIKELY=5  POTENTIAL=9
-  by vector: cname=6  ns=2  spf=4  dmarc=5
+  by tier:   CONFIRMED=4  LIKELY=5  POTENTIAL=8
+  by vector: cname=6  ns=2  spf=4  dmarc=3  axfr=1  caa=1
 ```
 
 The summary is stderr-only — it never mixes into the findings on stdout — and is
