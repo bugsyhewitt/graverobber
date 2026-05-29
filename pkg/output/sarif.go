@@ -127,9 +127,9 @@ var vectorRuleText = map[finding.Vector]struct {
 		"The subdomain delegates DNS to a provider whose hosted zone has been deleted; an attacker who re-creates the zone controls all records for the subdomain.",
 	},
 	finding.VectorSPF: {
-		"Dangling SPF include takeover",
-		"An SPF include: references an unregistered domain.",
-		"The domain's SPF record includes a directive pointing at an unregistered (NXDOMAIN) domain; registering it lets an attacker authorise spoofed mail (the SubdoMailing vector).",
+		"SPF dangling reference or permissive policy",
+		"An SPF record references an unregistered domain or authorises any sender.",
+		"The domain's SPF record is either dangling — an include:/redirect= directive points at an unregistered (NXDOMAIN) domain, so registering it lets an attacker authorise spoofed mail (the SubdoMailing vector) — or permissive: a Pass-qualified \"all\" mechanism (+all, or a bare \"all\") authorises every host on the internet to send mail as the domain, leaving it fully spoofable.",
 	},
 	finding.VectorMX: {
 		"Dangling MX record takeover",
@@ -234,8 +234,11 @@ func sarifMessage(f finding.Finding) string {
 			detail = fmt.Sprintf("CNAME -> %s (%s)", f.CNAME, f.Service)
 		}
 	case finding.VectorSPF:
-		if f.SPFInclude != "" {
+		switch {
+		case f.SPFInclude != "":
 			detail = "SPF include:" + f.SPFInclude
+		case f.SPFAll != "":
+			detail = "SPF " + f.SPFAll + " (permissive — any host)"
 		}
 	case finding.VectorNS:
 		if len(f.Nameservers) > 0 {

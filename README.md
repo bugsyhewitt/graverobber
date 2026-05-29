@@ -21,7 +21,7 @@ a recon pipeline.
 |---|---|---|
 | CNAME | Dangling CNAME → fingerprint match against a known-vulnerable service | The classic takeover; ~60+ services covered |
 | NS    | Delegated DNS hosted zone deleted at the provider, re-claimable | Hazy Hawk (.edu campaign, 2025–2026) |
-| SPF   | An SPF `include:` mechanism or `redirect=` modifier points at an unregistered, claimable domain | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day |
+| SPF   | An SPF `include:`/`redirect=` directive points at an unregistered, claimable domain, **or** the policy ends in `+all` (Pass — any host may send mail as the domain) | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day; `+all` = fully spoofable domain |
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, **or** publishes an inline RSA key below the RFC 8301 1024-bit floor | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012) |
 | DMARC | A `_dmarc` policy is monitor-only (`p=none`, spoofable) **or** its `rua=`/`ruf=` report domain is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon; `p=none` spoofing (BEC/phishing precondition) |
@@ -224,7 +224,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--silent` | false | Results only, suppress progress/banner |
 | `--verbose` | false | Verbose debug logging to stderr |
 | `--no-ns` | false | Skip NS takeover checks |
-| `--no-spf` | false | Skip SPF `include:`/`redirect=` checks |
+| `--no-spf` | false | Skip SPF `include:`/`redirect=` dangling and `+all` permissive-policy checks |
 | `--no-mx` | false | Skip MX dangling-record checks |
 | `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME + weak inline RSA key) |
 | `--no-dmarc` | false | Skip DMARC report-domain dangling checks |
@@ -282,9 +282,12 @@ above a `confirmed` threshold. The default (flag omitted) emits every finding.
 
 ### SPF policy takeover (`--no-spf`)
 
-An SPF record can hand control of a target's mail-authentication policy to
-another domain two ways, and both are exploitable when that domain is
-unregistered:
+graverobber flags two classes of SPF weakness: a **dangling reference** and a
+**permissive policy**.
+
+**Dangling reference.** An SPF record can hand control of a target's
+mail-authentication policy to another domain two ways, and both are exploitable
+when that domain is unregistered:
 
 - **`include:<domain>`** — a mechanism (RFC 7208 §5.2) that folds another
   domain's SPF record into the evaluation. This is the original SubdoMailing
@@ -300,8 +303,24 @@ still exist (bounded by the RFC 7208 ten-lookup cap), and emits a `POTENTIAL`
 who registers it controls the SPF evaluation and can authorise spoofed mail. The
 claimable domain is reported in the `spf_include` field for both directive kinds;
 the `evidence` string names which directive (`include:` or `redirect=`) pointed
-at it. DNS-only signal, no fingerprint — classified `POTENTIAL` like the rest of
-the email-auth surface.
+at it.
+
+**Permissive policy.** The `all` mechanism is the catch-all that ends a
+well-formed SPF record (RFC 7208 §5.1); its qualifier decides the result for any
+sender not matched earlier — `-all` (Fail, the secure default), `~all`
+(SoftFail), `?all` (Neutral), or `+all` (Pass). A `+all` policy — or a bare
+`all`, which §4.6.2 treats as `+all` — explicitly authorises **every host on the
+internet** to send mail as the domain, which defeats the entire purpose of
+publishing SPF: the domain is fully spoofable and any forged mail passes SPF
+alignment. This is the SPF analog of a DMARC `p=none` policy — a
+present-but-toothless email-auth record. graverobber emits a `POTENTIAL` `spf`
+finding keyed on the target itself (not an external domain), with the offending
+mechanism token in the `spf_all` field; `-all`, `~all`, and `?all` are never
+flagged.
+
+Both sub-cases are DNS-only signals with no fingerprint — classified
+`POTENTIAL` like the rest of the email-auth surface — and can fire independently
+for the same record.
 
 ### DKIM selector takeover (`--no-dkim`, `--selectors`)
 
@@ -458,13 +477,15 @@ JSONL — one finding per line:
 {"subdomain":"s1._domainkey.example.com","vector":"dkim","confidence":"LIKELY","dkim_selector":"s1","dkim_key_bits":512,"evidence":"DKIM selector publishes a 512-bit RSA key (below the RFC 8301 1024-bit floor) — factorable, forgeable signatures","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"reports.deleted-vendor.net","vector":"dmarc","confidence":"POTENTIAL","dmarc_uri":"reports.deleted-vendor.net","evidence":"DMARC rua/ruf report domain is NXDOMAIN (claimable — report interception)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"dmarc","confidence":"POTENTIAL","dmarc_policy":"none","evidence":"DMARC policy is p=none with no rua= aggregate reporting (no enforcement and no visibility)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"spoofable.example.com","vector":"spf","confidence":"POTENTIAL","spf_all":"+all","evidence":"SPF policy ends in +all (Pass — authorises any host to send mail as the domain; domain is spoofable)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"axfr","service":"ns1.example.com","confidence":"CONFIRMED","nameservers":["ns1.example.com"],"leaked_hosts":["admin.example.com","vpn.example.com"],"evidence":"nameserver ns1.example.com allowed unauthenticated AXFR (412 records leaked; sample: admin.example.com, vpn.example.com)","timestamp":"2026-05-28T12:00:00Z"}
 ```
 
 Without `--json`, findings render as one coloured human-readable line per
 finding. Each line carries the confidence tier, the vector tag, the subdomain,
 and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
-`include:`/`redirect=` domain (`spf`), the failed nameservers (`ns`), the dangling
+`include:`/`redirect=` domain or the permissive `+all` mechanism (`spf`), the
+failed nameservers (`ns`), the dangling
 mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation or
 weak inline RSA key size (`dkim`), the claimable `rua`/`ruf` report domain
 (`dmarc`), or the leaking

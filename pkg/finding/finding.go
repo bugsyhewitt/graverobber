@@ -19,8 +19,15 @@ const (
 	// VectorNS: the delegated DNS hosted zone has been deleted at the provider
 	// and is re-claimable.
 	VectorNS Vector = "ns"
-	// VectorSPF: an SPF include: directive references a domain that is
-	// unregistered and therefore claimable (the SubdoMailing vector).
+	// VectorSPF: an SPF record is either dangling or permissive. In the dangling
+	// sub-case an include:/redirect= directive references a domain that is
+	// unregistered and therefore claimable (the SubdoMailing vector); the
+	// SPFInclude field carries the claimable domain. In the permissive sub-case
+	// the record's "all" mechanism qualifies as Pass (+all, or a bare "all" which
+	// RFC 7208 §4.6.2 treats as +all) — authorising any host on the internet to
+	// send mail as the domain, leaving it fully spoofable; the SPFAll field
+	// carries the offending mechanism token. The two sub-cases are distinguished
+	// by which of SPFInclude / SPFAll is set.
 	VectorSPF Vector = "spf"
 	// VectorMX: a dangling MX record points at a mail host that is NXDOMAIN or
 	// belongs to a cloud mail provider whose hosted zone has been deleted.
@@ -135,8 +142,14 @@ type Finding struct {
 	// Nameservers is set for VectorNS findings: the delegated NS hostnames that
 	// failed to answer authoritatively.
 	Nameservers []string `json:"nameservers,omitempty"`
-	// SPFInclude is set for VectorSPF findings: the claimable include: domain.
+	// SPFInclude is set for the dangling VectorSPF sub-case: the claimable
+	// include:/redirect= domain.
 	SPFInclude string `json:"spf_include,omitempty"`
+	// SPFAll is set for the permissive VectorSPF sub-case: the offending "all"
+	// mechanism token ("+all" or a bare "all") whose qualifier is Pass, which
+	// authorises any host to send mail as the domain. It is empty for the
+	// dangling sub-case, which is identified instead by the SPFInclude field.
+	SPFAll string `json:"spf_all,omitempty"`
 	// MXHosts is set for VectorMX findings: the dangling mail-exchanger hostnames.
 	MXHosts []string `json:"mx_hosts,omitempty"`
 	// DKIMSelector is set for VectorDKIM findings: the selector whose

@@ -98,8 +98,11 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 			detail = fmt.Sprintf("%s -> %s", f.Service, f.CNAME)
 		}
 	case finding.VectorSPF:
-		if f.SPFInclude != "" {
+		switch {
+		case f.SPFInclude != "":
 			detail = fmt.Sprintf("spf include:%s", f.SPFInclude)
+		case f.SPFAll != "":
+			detail = fmt.Sprintf("spf %s (permissive — any host)", f.SPFAll)
 		}
 	case finding.VectorNS:
 		if len(f.Nameservers) > 0 {
