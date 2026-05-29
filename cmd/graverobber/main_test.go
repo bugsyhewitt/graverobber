@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/bugsyhewitt/graverobber/pkg/finding"
 )
 
 // TestParseSelectors verifies the --selectors comma-list parser: trimming,
@@ -76,6 +79,102 @@ func TestRunScan_RejectsConflictingFormats(t *testing.T) {
 				t.Errorf("runScan %s error = %q, want it to mention mutually exclusive", tc.name, err.Error())
 			}
 		})
+	}
+}
+
+// TestScanSummary_EmptyPrintsCountOnly verifies a zero-finding scan still emits
+// the bare count line and no breakdown — preserving the prior behaviour and
+// keeping a clean scan from printing empty "by tier" / "by vector" lines.
+func TestScanSummary_EmptyPrintsCountOnly(t *testing.T) {
+	var s scanSummary
+	var buf bytes.Buffer
+	s.write(&buf)
+
+	got := buf.String()
+	if got != "graverobber: 0 finding(s)\n" {
+		t.Errorf("empty summary = %q, want just the count line", got)
+	}
+	if strings.Contains(got, "by tier") || strings.Contains(got, "by vector") {
+		t.Errorf("empty summary leaked a breakdown line: %q", got)
+	}
+}
+
+// TestScanSummary_BreaksDownByTierAndVector verifies the breakdown counts each
+// finding into the right tier and vector buckets and that the totals add up.
+func TestScanSummary_BreaksDownByTierAndVector(t *testing.T) {
+	var s scanSummary
+	for _, f := range []finding.Finding{
+		{Vector: finding.VectorCNAME, Confidence: finding.Confirmed},
+		{Vector: finding.VectorCNAME, Confidence: finding.Likely},
+		{Vector: finding.VectorNS, Confidence: finding.Confirmed},
+		{Vector: finding.VectorSPF, Confidence: finding.Potential},
+		{Vector: finding.VectorSPF, Confidence: finding.Potential},
+	} {
+		s.tally(f)
+	}
+
+	if s.total != 5 {
+		t.Fatalf("total = %d, want 5", s.total)
+	}
+
+	var buf bytes.Buffer
+	s.write(&buf)
+	got := buf.String()
+
+	for _, want := range []string{
+		"graverobber: 5 finding(s)",
+		"by tier:",
+		"CONFIRMED=2", "LIKELY=1", "POTENTIAL=2",
+		"by vector:",
+		"cname=2", "ns=1", "spf=2",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary %q missing %q", got, want)
+		}
+	}
+}
+
+// TestScanSummary_OmitsAbsentCategories verifies the breakdown lists only the
+// tiers and vectors that actually occurred, so a single-vector scan stays
+// uncluttered (no "mx=0", "dkim=0", etc.).
+func TestScanSummary_OmitsAbsentCategories(t *testing.T) {
+	var s scanSummary
+	s.tally(finding.Finding{Vector: finding.VectorCNAME, Confidence: finding.Confirmed})
+
+	var buf bytes.Buffer
+	s.write(&buf)
+	got := buf.String()
+
+	for _, absent := range []string{"=0", "LIKELY", "POTENTIAL", "ns=", "spf=", "mx=", "dkim=", "dmarc="} {
+		if strings.Contains(got, absent) {
+			t.Errorf("single-finding summary %q should not contain %q", got, absent)
+		}
+	}
+}
+
+// TestScanSummary_BreakdownOrderIsStable verifies the tier breakdown reads
+// strongest-first and the vector breakdown follows the detector pipeline order,
+// regardless of the order findings were tallied in.
+func TestScanSummary_BreakdownOrderIsStable(t *testing.T) {
+	var s scanSummary
+	// Tally in a deliberately scrambled order.
+	for _, f := range []finding.Finding{
+		{Vector: finding.VectorDMARC, Confidence: finding.Potential},
+		{Vector: finding.VectorCNAME, Confidence: finding.Likely},
+		{Vector: finding.VectorNS, Confidence: finding.Confirmed},
+	} {
+		s.tally(f)
+	}
+
+	var buf bytes.Buffer
+	s.write(&buf)
+	got := buf.String()
+
+	if iC, iL, iP := strings.Index(got, "CONFIRMED"), strings.Index(got, "LIKELY"), strings.Index(got, "POTENTIAL"); !(iC < iL && iL < iP) {
+		t.Errorf("tier order not strongest-first in %q (CONFIRMED@%d LIKELY@%d POTENTIAL@%d)", got, iC, iL, iP)
+	}
+	if iCname, iNs, iDmarc := strings.Index(got, "cname="), strings.Index(got, "ns="), strings.Index(got, "dmarc="); !(iCname < iNs && iNs < iDmarc) {
+		t.Errorf("vector order not pipeline-order in %q (cname@%d ns@%d dmarc@%d)", got, iCname, iNs, iDmarc)
 	}
 }
 

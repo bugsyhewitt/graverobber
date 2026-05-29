@@ -342,6 +342,21 @@ mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation
 (`dkim`), or the claimable `rua`/`ruf` report domain (`dmarc`). ANSI colour is
 emitted only to a TTY; piped or file output is plain text.
 
+When the scan finishes, the human-readable mode closes with a triage summary on
+stderr: the total count, then a breakdown by confidence tier (strongest first)
+and by vector (pipeline order). Only the tiers and vectors that actually occurred
+are listed, so a single-vector scan stays uncluttered:
+
+```
+graverobber: 17 finding(s)
+  by tier:   CONFIRMED=3  LIKELY=5  POTENTIAL=9
+  by vector: cname=6  ns=2  spf=4  dmarc=5
+```
+
+The summary is stderr-only — it never mixes into the findings on stdout — and is
+suppressed by `--silent` and by every machine format (`--json`/`--sarif`/`--csv`),
+which emit their own self-describing documents.
+
 ### SARIF for GitHub Code Scanning (`--sarif`)
 
 `--sarif` renders the whole scan as a single
