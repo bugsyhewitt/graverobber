@@ -25,9 +25,14 @@ const (
 	// VectorMX: a dangling MX record points at a mail host that is NXDOMAIN or
 	// belongs to a cloud mail provider whose hosted zone has been deleted.
 	VectorMX Vector = "mx"
-	// VectorDKIM: a DKIM selector (<selector>._domainkey.<domain>) is published
-	// as a CNAME whose target is NXDOMAIN — the ESP resource is gone and an
-	// attacker who reclaims it can serve a DKIM key that signs spoofed mail.
+	// VectorDKIM: a DKIM selector (<selector>._domainkey.<domain>) is either
+	// published as a CNAME whose target is NXDOMAIN (the ESP resource is gone
+	// and an attacker who reclaims it can serve a DKIM key that signs spoofed
+	// mail), or published inline with an RSA public key whose modulus is below
+	// the RFC 8301 1024-bit floor (an attacker who factors the short key can
+	// forge DKIM signatures directly). The DKIMKeyBits field distinguishes the
+	// two cases: zero for the dangling-CNAME case, the modulus size for a weak
+	// inline key.
 	VectorDKIM Vector = "dkim"
 	// VectorDMARC: a DMARC policy at _dmarc.<domain> carries a rua=/ruf= report
 	// URI whose domain is NXDOMAIN — an attacker who claims it intercepts every
@@ -119,8 +124,13 @@ type Finding struct {
 	// MXHosts is set for VectorMX findings: the dangling mail-exchanger hostnames.
 	MXHosts []string `json:"mx_hosts,omitempty"`
 	// DKIMSelector is set for VectorDKIM findings: the selector whose
-	// _domainkey CNAME is dangling (e.g. "s1" for s1._domainkey.example.com).
+	// _domainkey record is at risk (e.g. "s1" for s1._domainkey.example.com).
 	DKIMSelector string `json:"dkim_selector,omitempty"`
+	// DKIMKeyBits is set for the weak-key VectorDKIM sub-case: the bit length of
+	// the inline RSA public key found at the selector when that length is below
+	// the RFC 8301 1024-bit floor. It is zero (omitted) for the dangling-CNAME
+	// sub-case, which is identified instead by the CNAME field.
+	DKIMKeyBits int `json:"dkim_key_bits,omitempty"`
 	// DMARCURI is set for VectorDMARC findings: the claimable rua/ruf report
 	// domain (the part after "mailto:...@").
 	DMARCURI string `json:"dmarc_uri,omitempty"`

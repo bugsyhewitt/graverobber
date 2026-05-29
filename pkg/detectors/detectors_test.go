@@ -2,7 +2,11 @@ package detectors
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
@@ -1120,5 +1124,230 @@ func TestSPF_LiveRedirectNoFinding(t *testing.T) {
 	}
 	if len(findings) != 0 {
 		t.Errorf("expected no findings for live redirect target, got %d: %+v", len(findings), findings)
+	}
+}
+
+// ---- DKIM weak inline key sub-vector ---------------------------------------
+
+// Pre-generated RSA public keys (base64 DER SubjectPublicKeyInfo, the RFC 6376
+// p= encoding) used to drive the weak-key path. The 512- and 768-bit keys are
+// constants because modern Go's crypto/rsa refuses to *generate* keys below 1024
+// bits (they are insecure — which is exactly the weakness this detector flags),
+// yet x509 still happily *parses* them, which is the path production exercises.
+// Generated once with `openssl genrsa <bits> | openssl rsa -pubout -outform DER`.
+const (
+	weakDKIMKey512 = "MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAM+qWU6fNj5OWpUB058EH8JJ4R40YXJSV42XKV4UnK0NAKz5X9yChoCGEjaaDHaAABv9irEScK6P6xKQmgFusEsCAwEAAQ=="
+	weakDKIMKey768 = "MHwwDQYJKoZIhvcNAQEBBQADawAwaAJhALn6vD6wapo8cerZ4DwipVSMrRXS4YNWEX00CK5JLp90ZQuNOwQac70uLWq+ujOeprzia66B0UjJABxaN9quxZ/Ro21kPmOUKEIyoPGfHAzpkCV7+vnOW/zLtv2KYTBhZQIDAQAB"
+)
+
+// dkimPublicKeyB64 generates an RSA key pair of the given size (>= 1024) and
+// returns the base64-encoded DER SubjectPublicKeyInfo. Used for the
+// at-or-above-floor (strong-key) cases; the weak cases use the constants above.
+func dkimPublicKeyB64(t *testing.T, bits int) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, bits)
+	if err != nil {
+		t.Fatalf("generate %d-bit RSA key: %v", bits, err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(der)
+}
+
+// TestParseDKIMTags checks tag splitting, lower-casing, whitespace handling, and
+// the p= whitespace-stripping that folded base64 records require.
+func TestParseDKIMTags(t *testing.T) {
+	tags := parseDKIMTags("V=DKIM1; K=rsa; p=AB CD\tEF ; t=y")
+	if tags["v"] != "DKIM1" {
+		t.Errorf("v: got %q, want DKIM1", tags["v"])
+	}
+	if tags["k"] != "rsa" {
+		t.Errorf("k: got %q, want rsa", tags["k"])
+	}
+	if tags["p"] != "ABCDEF" {
+		t.Errorf("p: whitespace not stripped, got %q", tags["p"])
+	}
+	if tags["t"] != "y" {
+		t.Errorf("t: got %q, want y", tags["t"])
+	}
+	// A part with no '=' must be ignored, not panic.
+	if got := parseDKIMTags("v=DKIM1; standalone; p=X"); got["p"] != "X" {
+		t.Errorf("standalone tag broke parsing: %v", got)
+	}
+}
+
+// TestRSAPublicKeyBits verifies the modulus size is read from a real DER SPKI
+// key and that a non-RSA / garbage value reports ok=false.
+func TestRSAPublicKeyBits(t *testing.T) {
+	p2048 := dkimPublicKeyB64(t, 2048)
+	if bits, ok := rsaPublicKeyBits(p2048); !ok || bits != 2048 {
+		t.Errorf("2048-bit key: got (%d, %v), want (2048, true)", bits, ok)
+	}
+	// A short key parses (x509 does not gate parse on size), reporting its bits.
+	if bits, ok := rsaPublicKeyBits(weakDKIMKey512); !ok || bits != 512 {
+		t.Errorf("512-bit key: got (%d, %v), want (512, true)", bits, ok)
+	}
+
+	// Not base64 at all.
+	if _, ok := rsaPublicKeyBits("!!!not-base64!!!"); ok {
+		t.Error("invalid base64 must report ok=false")
+	}
+	// Valid base64 but not a public key.
+	if _, ok := rsaPublicKeyBits(base64.StdEncoding.EncodeToString([]byte("hello"))); ok {
+		t.Error("non-key DER must report ok=false")
+	}
+}
+
+// TestWeakDKIMKeyBits is the table-driven core: only a genuinely short RSA key
+// yields (bits, true); everything else (strong key, revoked key, non-RSA, non-
+// DKIM record, malformed) yields (_, false).
+func TestWeakDKIMKeyBits(t *testing.T) {
+	weak := weakDKIMKey512    // below the 1024 floor
+	weak768 := weakDKIMKey768 // also below the floor
+	strong := dkimPublicKeyB64(t, 2048)
+
+	cases := []struct {
+		name     string
+		txts     []string
+		wantBits int
+		wantOK   bool
+	}{
+		{"weak 512-bit key", []string{"v=DKIM1; k=rsa; p=" + weak}, 512, true},
+		{"weak 768-bit key", []string{"v=DKIM1; k=rsa; p=" + weak768}, 768, true},
+		{"weak key, no v= tag", []string{"k=rsa; p=" + weak}, 512, true},
+		{"weak key, no k= tag (rsa default)", []string{"v=DKIM1; p=" + weak}, 512, true},
+		{"strong 2048-bit key", []string{"v=DKIM1; k=rsa; p=" + strong}, 0, false},
+		{"revoked key (empty p=)", []string{"v=DKIM1; k=rsa; p="}, 0, false},
+		{"non-RSA key type", []string{"v=DKIM1; k=ed25519; p=" + weak}, 0, false},
+		{"not a DKIM record", []string{"v=spf1 include:a.com -all"}, 0, false},
+		{"wrong v= version", []string{"v=DKIM2; k=rsa; p=" + weak}, 0, false},
+		{"no records", nil, 0, false},
+		{"first record junk, second weak", []string{"some-other-txt", "v=DKIM1; p=" + weak}, 512, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			bits, ok := weakDKIMKeyBits(c.txts)
+			if ok != c.wantOK || bits != c.wantBits {
+				t.Errorf("weakDKIMKeyBits = (%d, %v), want (%d, %v)", bits, ok, c.wantBits, c.wantOK)
+			}
+		})
+	}
+}
+
+// dkimKeyDNSServer models a selector that publishes an inline DKIM TXT key (no
+// CNAME). The selector keySel._domainkey.<target> returns a TXT record carrying
+// keyTXT; that name has no CNAME. Every other name returns NOERROR/no-answer.
+func dkimKeyDNSServer(t *testing.T, keyFQDN, keyTXT string) (string, func()) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+
+			q := req.Question[0]
+			name := q.Name
+
+			if q.Qtype == dns.TypeTXT && name == dns.Fqdn(keyFQDN) {
+				resp.Answer = []dns.RR{&dns.TXT{
+					Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 300},
+					Txt: []string{keyTXT},
+				}}
+			}
+			// CNAME queries and all other names: NOERROR/no-answer → not
+			// delegated, drives the detector into the inline-key path.
+
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	return pc.LocalAddr().String(), func() { pc.Close() }
+}
+
+// TestDKIM_WeakInlineKeyLikely drives the full detector: a selector publishing a
+// 512-bit inline RSA key (no CNAME) must yield exactly one LIKELY VectorDKIM
+// finding carrying the bit size, the selector, and no CNAME.
+func TestDKIM_WeakInlineKeyLikely(t *testing.T) {
+	const (
+		target   = "example.com"
+		selector = "s1"
+	)
+	keyFQDN := selector + "._domainkey." + target
+	keyTXT := "v=DKIM1; k=rsa; p=" + weakDKIMKey512
+
+	addr, cleanup := dkimKeyDNSServer(t, keyFQDN, keyTXT)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DKIM(ctx, target, r, []string{"s1", "s2", "default"})
+	if err != nil {
+		t.Fatalf("DKIM: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 weak-key finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Vector != finding.VectorDKIM {
+		t.Errorf("vector: got %q, want dkim", f.Vector)
+	}
+	if f.Confidence != finding.Likely {
+		t.Errorf("confidence: got %q, want LIKELY", f.Confidence)
+	}
+	if f.DKIMKeyBits != 512 {
+		t.Errorf("dkim_key_bits: got %d, want 512", f.DKIMKeyBits)
+	}
+	if f.DKIMSelector != selector {
+		t.Errorf("selector: got %q, want %q", f.DKIMSelector, selector)
+	}
+	if f.CNAME != "" {
+		t.Errorf("weak-key finding must not carry a CNAME, got %q", f.CNAME)
+	}
+	if f.Subdomain != keyFQDN {
+		t.Errorf("subdomain: got %q, want %q", f.Subdomain, keyFQDN)
+	}
+	if !strings.Contains(f.Evidence, "RFC 8301") {
+		t.Errorf("evidence should cite RFC 8301, got %q", f.Evidence)
+	}
+}
+
+// TestDKIM_StrongInlineKeyNoFinding verifies a selector publishing a 2048-bit
+// inline key produces no finding.
+func TestDKIM_StrongInlineKeyNoFinding(t *testing.T) {
+	const target = "example.com"
+	keyFQDN := "s1._domainkey." + target
+	keyTXT := "v=DKIM1; k=rsa; p=" + dkimPublicKeyB64(t, 2048)
+
+	addr, cleanup := dkimKeyDNSServer(t, keyFQDN, keyTXT)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DKIM(ctx, target, r, []string{"s1", "default"})
+	if err != nil {
+		t.Fatalf("DKIM: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings for a strong inline key, got %d: %+v", len(findings), findings)
 	}
 }

@@ -107,6 +107,9 @@ func csvTarget(f finding.Finding) string {
 	case finding.VectorMX:
 		return strings.Join(f.MXHosts, " ")
 	case finding.VectorDKIM:
+		if f.DKIMKeyBits > 0 {
+			return fmt.Sprintf("%s._domainkey (%d-bit RSA key)", f.DKIMSelector, f.DKIMKeyBits)
+		}
 		if f.DKIMSelector != "" {
 			return fmt.Sprintf("%s._domainkey -> %s", f.DKIMSelector, f.CNAME)
 		}

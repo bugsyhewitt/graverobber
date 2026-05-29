@@ -23,7 +23,7 @@ a recon pipeline.
 | NS    | Delegated DNS hosted zone deleted at the provider, re-claimable | Hazy Hawk (.edu campaign, 2025–2026) |
 | SPF   | An SPF `include:` mechanism or `redirect=` modifier points at an unregistered, claimable domain | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day |
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
-| DKIM  | A `<selector>._domainkey` CNAME delegates to an ESP resource that is now NXDOMAIN | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024) |
+| DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, **or** publishes an inline RSA key below the RFC 8301 1024-bit floor | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012) |
 | DMARC | A `_dmarc` policy's `rua=`/`ruf=` report domain is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon |
 | AXFR  | A delegated nameserver allows an unauthenticated zone transfer, leaking every record | Classic DNS misconfiguration; force-multiplier for every other vector |
 
@@ -223,7 +223,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-ns` | false | Skip NS takeover checks |
 | `--no-spf` | false | Skip SPF `include:`/`redirect=` checks |
 | `--no-mx` | false | Skip MX dangling-record checks |
-| `--no-dkim` | false | Skip DKIM selector dangling-CNAME checks |
+| `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME + weak inline RSA key) |
 | `--no-dmarc` | false | Skip DMARC report-domain dangling checks |
 | `--no-axfr` | false | Skip AXFR zone-transfer misconfiguration checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
@@ -312,10 +312,23 @@ that passes DKIM verification. This is the DKIM half of the SubdoMailing vector
 The selector name is not discoverable from DNS alone, so graverobber probes a
 list of common ESP selectors by default (`default`, `google`, `k1`, `k2`, `s1`,
 `s2`, `selector1`, `selector2`, `dkim`, `mail`, `smtp`). Override the list with
-`--selectors` (comma-separated) when you know the selector in use. For each
-selector, graverobber resolves the `_domainkey` CNAME; if its target is
-`NXDOMAIN` it emits a `CONFIRMED` `dkim` finding. Selectors published as inline
-TXT keys (not delegated) are never flagged.
+`--selectors` (comma-separated) when you know the selector in use.
+
+The DKIM vector checks two distinct weaknesses per selector:
+
+- **Dangling delegation (`CONFIRMED`).** If the selector is published as a CNAME
+  whose target is `NXDOMAIN`, the ESP resource is gone and reclaimable — an
+  attacker who reclaims it can serve a DKIM key and sign email that passes DKIM
+  verification.
+- **Weak inline key (`LIKELY`).** If the selector instead publishes the key
+  inline as a TXT record, graverobber parses the RSA public key (`p=` tag) and
+  flags any modulus below **1024 bits** — the floor mandated by
+  [RFC 8301](https://www.rfc-editor.org/rfc/rfc8301). A 512-bit DKIM key has been
+  factored in hours on commodity hardware, letting an attacker recover the
+  private key and forge DKIM-passing signatures without touching DNS at all. The
+  finding carries `dkim_key_bits` with the offending size. Keys that meet the
+  floor, non-RSA keys, and explicitly-revoked keys (empty `p=`) are never
+  flagged.
 
 ### DMARC report-domain takeover (`--no-dmarc`)
 
@@ -381,6 +394,7 @@ JSONL — one finding per line:
 
 ```json
 {"subdomain":"dev.example.com","vector":"cname","service":"AWS/S3","confidence":"CONFIRMED","cname":"example.s3.amazonaws.com","fingerprint":"The specified bucket does not exist","scheme":"https","timestamp":"2026-05-16T12:34:56Z"}
+{"subdomain":"s1._domainkey.example.com","vector":"dkim","confidence":"LIKELY","dkim_selector":"s1","dkim_key_bits":512,"evidence":"DKIM selector publishes a 512-bit RSA key (below the RFC 8301 1024-bit floor) — factorable, forgeable signatures","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"reports.deleted-vendor.net","vector":"dmarc","confidence":"POTENTIAL","dmarc_uri":"reports.deleted-vendor.net","evidence":"DMARC rua/ruf report domain is NXDOMAIN (claimable — report interception)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"axfr","service":"ns1.example.com","confidence":"CONFIRMED","nameservers":["ns1.example.com"],"leaked_hosts":["admin.example.com","vpn.example.com"],"evidence":"nameserver ns1.example.com allowed unauthenticated AXFR (412 records leaked; sample: admin.example.com, vpn.example.com)","timestamp":"2026-05-28T12:00:00Z"}
 ```
@@ -389,8 +403,9 @@ Without `--json`, findings render as one coloured human-readable line per
 finding. Each line carries the confidence tier, the vector tag, the subdomain,
 and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
 `include:`/`redirect=` domain (`spf`), the failed nameservers (`ns`), the dangling
-mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation
-(`dkim`), the claimable `rua`/`ruf` report domain (`dmarc`), or the leaking
+mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation or
+weak inline RSA key size (`dkim`), the claimable `rua`/`ruf` report domain
+(`dmarc`), or the leaking
 nameserver and leaked-host count (`axfr`). ANSI colour is emitted only to a TTY;
 piped or file output is plain text.
 

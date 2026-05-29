@@ -124,6 +124,14 @@ func TestTerminalWriter_RendersDetailForEveryVector(t *testing.T) {
 			wantSub: []string{"example.com", "s1", "s1.domainkey.gone.sendgrid.net"},
 		},
 		{
+			name: "dkim-weak-key",
+			f: finding.Finding{
+				Subdomain: "s1._domainkey.example.com", Vector: finding.VectorDKIM,
+				Confidence: finding.Likely, DKIMSelector: "s1", DKIMKeyBits: 512,
+			},
+			wantSub: []string{"s1._domainkey.example.com", "s1", "512"},
+		},
+		{
 			name: "dmarc",
 			f: finding.Finding{
 				Subdomain: "example.com", Vector: finding.VectorDMARC,
