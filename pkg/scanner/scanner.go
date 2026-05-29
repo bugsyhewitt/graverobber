@@ -35,6 +35,7 @@ type Options struct {
 	NoCAA         bool          // skip the CAA misconfiguration vector
 	NoTLSA        bool          // skip the TLSA dangling-DANE-pin vector
 	NoMTASTS      bool          // skip the MTA-STS dangling-policy-host vector
+	NoBIMI        bool          // skip the BIMI dangling-asset-host vector
 	HTTPOnly      bool          // probe services over HTTP only
 	HTTPSOnly     bool          // probe services over HTTPS only
 	Resolvers     []string      // custom recursive DNS resolvers
@@ -174,6 +175,9 @@ var (
 	mtaStsVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
 		return detectors.MTASTS(ctx, target, s.resolver)
 	}
+	bimiVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.BIMI(ctx, target, s.resolver)
+	}
 )
 
 // scanTarget runs the per-target detection pipeline and emits any findings.
@@ -190,7 +194,7 @@ var (
 // as before, so output semantics are unchanged.
 func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.Map, out chan<- finding.Finding) {
 	// Select the enabled vectors. CNAME always runs; NS, SPF, MX, DKIM, DMARC,
-	// AXFR, CAA, TLSA, and MTA-STS are opt-out.
+	// AXFR, CAA, TLSA, MTA-STS, and BIMI are opt-out.
 	vectors := []vectorFunc{cnameVector}
 	if !s.opts.NoNS {
 		vectors = append(vectors, nsVector)
@@ -218,6 +222,9 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.M
 	}
 	if !s.opts.NoMTASTS {
 		vectors = append(vectors, mtaStsVector)
+	}
+	if !s.opts.NoBIMI {
+		vectors = append(vectors, bimiVector)
 	}
 
 	// Fan out: run each enabled vector concurrently, collecting findings into a

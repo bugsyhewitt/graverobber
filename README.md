@@ -1,14 +1,14 @@
 # graverobber
 
-**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer, CAA misconfiguration, dangling DANE TLSA pins, and dangling MTA-STS policy hosts.**
+**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer, CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, and dangling BIMI asset hosts.**
 
 > Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, DKIM,
 > and DMARC takeover detection plus unauthenticated AXFR zone-transfer discovery,
-> CAA misconfiguration, dangling DANE TLSA pins, and dangling MTA-STS policy hosts in one pipeline-friendly Go binary.
+> CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, and dangling BIMI asset hosts in one pipeline-friendly Go binary.
 
 `graverobber` is the only maintained Go binary that covers **CNAME**, **NS**,
 **SPF**, **MX**, **DKIM**, and **DMARC** takeover vectors plus **AXFR**
-zone-transfer, **CAA** misconfiguration, dangling **DANE TLSA** pins, and dangling **MTA-STS** policy hosts in a single tool. It is a static binary with no
+zone-transfer, **CAA** misconfiguration, dangling **DANE TLSA** pins, dangling **MTA-STS** policy hosts, and dangling **BIMI** asset hosts in a single tool. It is a static binary with no
 runtime, reads targets from stdin/file/flag, streams JSONL, and uses the
 exit-code conventions of the `httpx`/`subfinder` family so it drops straight into
 a recon pipeline.
@@ -29,6 +29,7 @@ a recon pipeline.
 | CAA   | A `CAA` record names a CA domain that is NXDOMAIN and re-claimable, **or** uses the `*` wildcard authorising any CA to issue | Missing/weak certificate-issuance control → man-in-the-middle TLS |
 | TLSA  | A DANE `TLSA` pin at `_25._tcp.<mxhost>` covers an MX host that is NXDOMAIN — a dangling, DNSSEC-authenticated pin | Hard-fails inbound mail from DANE senders; reclaimable mail host → DANE-trusted interception (RFC 7672) |
 | MTA-STS | An MTA-STS policy is advertised (`v=STSv1` TXT at `_mta-sts.<domain>`) but the policy host `mta-sts.<domain>` is NXDOMAIN and re-claimable | Reclaimed policy host serves a forged policy (`mode: none` disables TLS enforcement, or an attacker `mx:` list redirects mail) → TLS downgrade / mail interception (RFC 8461) |
+| BIMI | A BIMI record (`v=BIMI1` TXT at `default._bimi.<domain>`) names a logo (`l=`) or VMC (`a=`) URL whose host is NXDOMAIN and re-claimable | Reclaimed asset host serves a forged brand logo/VMC, displayed beside DMARC-passing mail → brand-impersonation phishing (BIMI spec) |
 
 Most scanners cover CNAME only. NS, SPF, MX, DKIM, and DMARC takeover are live,
 actively-exploited vectors that almost no Go tool handles. Together SPF, DKIM,
@@ -88,7 +89,7 @@ graverobber -l subs.txt --fingerprints ~/private.json
 graverobber -l subs.txt --offline
 
 # Skip vectors
-graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa --no-mtasts
+graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa --no-mtasts --no-bimi
 
 # Probe a custom set of DKIM selectors instead of the built-in ESP defaults
 graverobber -l subs.txt --selectors default,google,s1,s2,k1
@@ -242,6 +243,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-caa` | false | Skip CAA (Certification Authority Authorization) misconfiguration checks |
 | `--no-tlsa` | false | Skip TLSA dangling-DANE-pin checks |
 | `--no-mtasts` | false | Skip MTA-STS dangling-policy-host checks |
+| `--no-bimi` | false | Skip BIMI dangling-asset-host checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
 | `--offline` | false | Cached/embedded fingerprints only, no network |
@@ -530,6 +532,44 @@ A domain that does not advertise MTA-STS, or whose policy host still resolves, i
 the healthy case and is intentionally **not** flagged — only an advertised-but-
 orphaned policy host is reported.
 
+### Dangling BIMI asset host (`--no-bimi`)
+
+BIMI (Brand Indicators for Message Identification) lets a domain publish a brand
+logo — optionally backed by a Verified Mark Certificate (VMC) — that BIMI-aware
+mail clients (Gmail, Apple Mail, Yahoo, Fastmail) fetch and render beside
+authenticated mail from the domain. It is a pure trust-signalling feature: the
+logo displays **only** for mail that already passes DMARC at enforcement, so to
+the recipient the logo is a visual mark of authenticity. A domain opts in with a
+single `TXT` record at `default._bimi.<domain>`:
+
+```
+default._bimi.example.com.  TXT  "v=BIMI1; l=https://images.example.com/logo.svg; a=https://certs.example.com/vmc.pem"
+```
+
+- `l=` names the HTTPS URL of the SVG Tiny P/S logo (mandatory for display).
+- `a=` names the HTTPS URL of the VMC `.pem` that cryptographically binds the
+  logo to the brand (optional, but required by Gmail and the strictest tier).
+
+Both URLs are, in practice, hosted on a brand subdomain or a vendor host (a CDN
+bucket, a BIMI-as-a-service host). When that asset host is decommissioned — the
+bucket is released, the hosted zone is deleted, the brand-asset subdomain is
+retired — but the BIMI `TXT` record is left behind, you get a **dangling BIMI
+asset host**. An attacker who reclaims the gone host can serve an arbitrary logo
+at the `l=` URL (and, where the VMC host is the reclaimed one, an arbitrary VMC at
+the `a=` URL). Because the logo renders only beside DMARC-passing mail, a forged
+logo lends a spoofing campaign the exact visual trust mark BIMI exists to confer —
+a brand-impersonation surface.
+
+graverobber resolves `default._bimi.<target>`; if a `v=BIMI1` record is present it
+parses the `l=` and `a=` URLs and probes each referenced host. A host that is
+NXDOMAIN is reported as a `POTENTIAL` `bimi` finding carrying the BIMI owner name
+in `service` and the dangling asset host in `bimi_uri_host`; the `evidence` string
+names which tag (`l=`/`a=`) pointed at it (a single host backing both URLs yields
+one finding attributing both). A domain that does not advertise BIMI, or whose
+asset hosts all resolve, is the healthy case and is intentionally **not** flagged.
+The `a=self` and empty-value forms name no remote host and are likewise never
+flagged — only an advertised-but-orphaned asset host is reported.
+
 ---
 
 ## Confidence model
@@ -557,6 +597,7 @@ JSONL — one finding per line:
 {"subdomain":"example.com","vector":"axfr","service":"ns1.example.com","confidence":"CONFIRMED","nameservers":["ns1.example.com"],"leaked_hosts":["admin.example.com","vpn.example.com"],"evidence":"nameserver ns1.example.com allowed unauthenticated AXFR (412 records leaked; sample: admin.example.com, vpn.example.com)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"tlsa","confidence":"POTENTIAL","mx_hosts":["mx.deleted-vendor.invalid"],"tlsa_name":"_25._tcp.mx.deleted-vendor.invalid","evidence":"DANE TLSA pin published at _25._tcp.mx.deleted-vendor.invalid but MX host mx.deleted-vendor.invalid is NXDOMAIN (dangling DANE pin — hard-fails inbound mail; reclaimable for DANE-trusted interception)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"mtasts","service":"mta-sts.example.com","confidence":"POTENTIAL","cname":"policy.deleted-vendor.invalid","evidence":"MTA-STS policy advertised at _mta-sts.example.com but policy host mta-sts.example.com is NXDOMAIN (dangling MTA-STS host — reclaimable to serve a forged policy that disables TLS enforcement or redirects mail)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"example.com","vector":"bimi","service":"default._bimi.example.com","confidence":"POTENTIAL","bimi_uri_host":"images.deleted-vendor.invalid","evidence":"BIMI record at default._bimi.example.com l= asset host images.deleted-vendor.invalid is NXDOMAIN (dangling BIMI asset host — reclaimable to serve a forged brand logo/VMC beside DMARC-passing mail)","timestamp":"2026-05-28T12:00:00Z"}
 ```
 
 Without `--json`, findings render as one coloured human-readable line per
@@ -573,7 +614,7 @@ piped or file output is plain text.
 When the scan finishes, the human-readable mode closes with a triage summary on
 stderr: the total count, then a breakdown by confidence tier (strongest first)
 and by vector (pipeline order). The by-vector breakdown covers every vector the
-scanner can emit (`cname`, `ns`, `spf`, `mx`, `dkim`, `dmarc`, `axfr`, `caa`, `tlsa`), so
+scanner can emit (`cname`, `ns`, `spf`, `mx`, `dkim`, `dmarc`, `axfr`, `caa`, `tlsa`, `mtasts`, `bimi`), so
 the per-vector counts always reconcile with the total. Only the tiers and vectors
 that actually occurred are listed, so a single-vector scan stays uncluttered:
 

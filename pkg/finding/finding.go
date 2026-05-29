@@ -84,6 +84,17 @@ const (
 	// The dangling policy host is carried in Service and the claimable CNAME
 	// target (or the policy host itself) in CNAME.
 	VectorMTASTS Vector = "mtasts"
+	// VectorBIMI: a domain advertises BIMI (Brand Indicators for Message
+	// Identification) via a TXT record at <selector>._bimi.<domain> whose l= logo
+	// URL or a= VMC-certificate URL points at a host that is NXDOMAIN — a dangling
+	// BIMI asset host. Mail clients that support BIMI fetch and display the logo
+	// (and validate the VMC) next to the authenticated sender; an attacker who
+	// reclaims the gone asset host can serve a forged brand logo or VMC, turning
+	// BIMI — a trust-signalling feature — into a brand-impersonation surface that
+	// makes phishing mail look more legitimate. The dangling asset host is carried
+	// in BIMIURIHost and the BIMI owner name (e.g. "default._bimi.example.com") in
+	// Service.
+	VectorBIMI Vector = "bimi"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.
@@ -201,6 +212,11 @@ type Finding struct {
 	// dangling TLSA record set (e.g. "_25._tcp.mx.example.com"). The dangling mail
 	// host the pin covers is carried in MXHosts.
 	TLSAName string `json:"tlsa_name,omitempty"`
+	// BIMIURIHost is set for VectorBIMI findings: the hostname parsed out of a
+	// BIMI l= (logo) or a= (VMC certificate) URL whose host is NXDOMAIN and
+	// therefore reclaimable. The BIMI owner name is carried in Service; the
+	// Evidence string names which tag (l= or a=) pointed at the dangling host.
+	BIMIURIHost string `json:"bimi_uri_host,omitempty"`
 
 	// Scheme records which scheme produced an HTTP-based match: "https" or
 	// "http" (see handoff open question #4).
