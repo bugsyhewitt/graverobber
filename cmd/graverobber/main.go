@@ -80,6 +80,7 @@ type cliFlags struct {
 	noDMARC       bool
 	noAXFR        bool
 	noCAA         bool
+	noTLSA        bool
 	selectors     string
 	fingerprints  []string
 	offline       bool
@@ -133,6 +134,7 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVar(&f.noDMARC, "no-dmarc", false, "skip DMARC report-domain dangling checks")
 	fl.BoolVar(&f.noAXFR, "no-axfr", false, "skip AXFR zone-transfer misconfiguration checks")
 	fl.BoolVar(&f.noCAA, "no-caa", false, "skip CAA (Certification Authority Authorization) misconfiguration checks")
+	fl.BoolVar(&f.noTLSA, "no-tlsa", false, "skip TLSA dangling-DANE-pin checks")
 	fl.StringVar(&f.selectors, "selectors", "", "comma-separated DKIM selectors to probe (default: common ESP selectors)")
 	fl.StringArrayVar(&f.fingerprints, "fingerprints", nil, "additional fingerprint JSON to merge (repeatable)")
 	fl.BoolVar(&f.offline, "offline", false, "use cached/embedded fingerprints only, no network")
@@ -236,6 +238,7 @@ func runScan(ctx context.Context, f *cliFlags) error {
 		NoDMARC:       f.noDMARC,
 		NoAXFR:        f.noAXFR,
 		NoCAA:         f.noCAA,
+		NoTLSA:        f.noTLSA,
 		HTTPOnly:      f.httpOnly,
 		HTTPSOnly:     f.httpsOnly,
 		Resolvers:     resolvers,
@@ -322,7 +325,7 @@ var summaryTierOrder = []finding.Confidence{finding.Confirmed, finding.Likely, f
 var summaryVectorOrder = []finding.Vector{
 	finding.VectorCNAME, finding.VectorNS, finding.VectorSPF,
 	finding.VectorMX, finding.VectorDKIM, finding.VectorDMARC,
-	finding.VectorAXFR, finding.VectorCAA,
+	finding.VectorAXFR, finding.VectorCAA, finding.VectorTLSA,
 }
 
 // write renders the summary to w. With no findings it prints the bare count line

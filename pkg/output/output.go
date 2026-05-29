@@ -136,6 +136,12 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		} else {
 			detail = "caa authorises any CA (permissive)"
 		}
+	case finding.VectorTLSA:
+		if len(f.MXHosts) > 0 {
+			detail = fmt.Sprintf("tlsa %s pins %s NXDOMAIN (dangling DANE pin)", f.TLSAName, f.MXHosts[0])
+		} else {
+			detail = fmt.Sprintf("tlsa %s dangling DANE pin", f.TLSAName)
+		}
 	}
 
 	_, err := fmt.Fprintf(t.w, "[%s] [%s] %s  %s\n",

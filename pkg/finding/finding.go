@@ -65,6 +65,16 @@ const (
 	// purpose of publishing CAA at all. The two sub-cases are distinguished by
 	// whether CAAIssuer is set.
 	VectorCAA Vector = "caa"
+	// VectorTLSA: a domain publishes a DANE TLSA record (RFC 6698 / RFC 7672)
+	// pinning the TLS certificate of a mail exchanger, but the MX host the pin
+	// covers is NXDOMAIN — a dangling DANE pin. Because DANE for SMTP mandates
+	// DNSSEC, the stale pin is authenticated: an attacker who reclaims the gone
+	// mail host can present a certificate that matches the published TLSA
+	// association and be trusted by DANE-validating senders, while in the
+	// meantime the orphaned pin hard-fails delivery from every DANE sender. The
+	// TLSAName field carries the DANE-prefixed owner name (e.g.
+	// "_25._tcp.mx.example.com") and MXHosts carries the dangling mail host.
+	VectorTLSA Vector = "tlsa"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.
@@ -178,6 +188,10 @@ type Finding struct {
 	// not serialised). For VectorAXFR, the leaking nameserver is in Service and
 	// also the sole entry in Nameservers.
 	LeakedHosts []string `json:"leaked_hosts,omitempty"`
+	// TLSAName is set for VectorTLSA findings: the DANE-prefixed owner name of the
+	// dangling TLSA record set (e.g. "_25._tcp.mx.example.com"). The dangling mail
+	// host the pin covers is carried in MXHosts.
+	TLSAName string `json:"tlsa_name,omitempty"`
 
 	// Scheme records which scheme produced an HTTP-based match: "https" or
 	// "http" (see handoff open question #4).

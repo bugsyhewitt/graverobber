@@ -427,6 +427,31 @@ func (r *Resolver) CAA(ctx context.Context, host string) ([]CAARecord, error) {
 	return out, nil
 }
 
+// TLSA returns whether a TLSA (DANE, RFC 6698) record set is published at host
+// and the count of records found. host is the DANE-prefixed name, e.g.
+// "_25._tcp.mx.example.com". An empty/zero result with a nil error means no
+// TLSA record set exists at host.
+//
+// graverobber does not interpret the TLSA RDATA (usage/selector/matching-type or
+// the certificate-association payload): the dangling-DANE vector only needs to
+// know that a pin EXISTS for a host whose underlying mail exchanger is NXDOMAIN.
+// The count is surfaced as evidence.
+func (r *Resolver) TLSA(ctx context.Context, host string) (count int, err error) {
+	resp, err := r.query(ctx, host, dns.TypeTLSA)
+	if err != nil {
+		return 0, err
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		return 0, nil
+	}
+	for _, rr := range resp.Answer {
+		if _, ok := rr.(*dns.TLSA); ok {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // soaRetries is the number of UDP attempts before escalating to TCP.
 // Transient SERVFAIL and packet loss are common; retrying reduces false
 // negatives without risking false positives (a real deletion returns

@@ -33,6 +33,7 @@ type Options struct {
 	NoDMARC       bool          // skip the DMARC report-domain vector
 	NoAXFR        bool          // skip the AXFR zone-transfer vector
 	NoCAA         bool          // skip the CAA misconfiguration vector
+	NoTLSA        bool          // skip the TLSA dangling-DANE-pin vector
 	HTTPOnly      bool          // probe services over HTTP only
 	HTTPSOnly     bool          // probe services over HTTPS only
 	Resolvers     []string      // custom recursive DNS resolvers
@@ -166,6 +167,9 @@ var (
 	caaVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
 		return detectors.CAA(ctx, target, s.resolver)
 	}
+	tlsaVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.TLSA(ctx, target, s.resolver)
+	}
 )
 
 // scanTarget runs the per-target detection pipeline and emits any findings.
@@ -182,7 +186,7 @@ var (
 // as before, so output semantics are unchanged.
 func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.Map, out chan<- finding.Finding) {
 	// Select the enabled vectors. CNAME always runs; NS, SPF, MX, DKIM, DMARC,
-	// AXFR, and CAA are opt-out.
+	// AXFR, CAA, and TLSA are opt-out.
 	vectors := []vectorFunc{cnameVector}
 	if !s.opts.NoNS {
 		vectors = append(vectors, nsVector)
@@ -204,6 +208,9 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.M
 	}
 	if !s.opts.NoCAA {
 		vectors = append(vectors, caaVector)
+	}
+	if !s.opts.NoTLSA {
+		vectors = append(vectors, tlsaVector)
 	}
 
 	// Fan out: run each enabled vector concurrently, collecting findings into a

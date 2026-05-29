@@ -752,3 +752,97 @@ func TestCAA_EmptyOnNXDOMAIN(t *testing.T) {
 		t.Errorf("expected nil records on NXDOMAIN, got %+v", got)
 	}
 }
+
+// TestTLSA_CountsRecords verifies TLSA reports the number of TLSA RRs published
+// at a DANE owner name, ignoring non-TLSA answers.
+func TestTLSA_CountsRecords(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			name := dns.Fqdn("_25._tcp.mx.example.com")
+			resp.Answer = []dns.RR{
+				&dns.TLSA{
+					Hdr:   dns.RR_Header{Name: name, Rrtype: dns.TypeTLSA, Class: dns.ClassINET, Ttl: 300},
+					Usage: 3, Selector: 1, MatchingType: 1,
+					Certificate: "00",
+				},
+				&dns.TLSA{
+					Hdr:   dns.RR_Header{Name: name, Rrtype: dns.TypeTLSA, Class: dns.ClassINET, Ttl: 300},
+					Usage: 2, Selector: 0, MatchingType: 1,
+					Certificate: "11",
+				},
+			}
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	r := New([]string{pc.LocalAddr().String()}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	count, err := r.TLSA(ctx, "_25._tcp.mx.example.com")
+	if err != nil {
+		t.Fatalf("TLSA: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 TLSA records, got %d", count)
+	}
+}
+
+// TestTLSA_ZeroOnNXDOMAIN verifies TLSA returns (0, nil) on a non-Success rcode,
+// mirroring MX/TXT/CAA.
+func TestTLSA_ZeroOnNXDOMAIN(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			resp.Rcode = dns.RcodeNameError
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+
+	r := New([]string{pc.LocalAddr().String()}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	count, err := r.TLSA(ctx, "_25._tcp.gone.example.com")
+	if err != nil {
+		t.Fatalf("TLSA returned error on NXDOMAIN, want nil: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 records on NXDOMAIN, got %d", count)
+	}
+}
