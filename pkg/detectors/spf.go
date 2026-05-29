@@ -13,11 +13,11 @@ import (
 // lookups at 10; the build step should enforce that limit here.
 const maxSPFDepth = 10
 
-// SPF detects subdomain takeover via a claimable SPF include: domain or
-// redirect= modifier — the SubdoMailing vector (Guardio Labs, Feb 2024).
+// SPF detects two classes of SPF weakness on a domain: a dangling reference
+// (the SubdoMailing takeover) and a permissive "all" mechanism.
 //
-// Two SPF directives reference an external domain's policy and are therefore
-// equally exploitable when that domain is unregistered:
+// Dangling-reference sub-case. Two SPF directives reference an external domain's
+// policy and are therefore equally exploitable when that domain is unregistered:
 //
 //   - include:<domain> — a mechanism (RFC 7208 §5.2) that pulls in another
 //     domain's SPF record; a passing result there contributes to the policy.
@@ -27,16 +27,29 @@ const maxSPFDepth = 10
 //     dangling include: because the redirect target's policy replaces the local
 //     one wholesale.
 //
-// Both yield the SubdoMailing takeover: an attacker who registers the claimable
-// target domain controls the SPF evaluation and can authorise spoofed mail.
+// Both yield the SubdoMailing takeover (Guardio Labs, Feb 2024): an attacker who
+// registers the claimable target domain controls the SPF evaluation and can
+// authorise spoofed mail. The claimable domain is carried in SPFInclude.
 //
-// Algorithm (handoff "Detection vectors / 3. SPF include takeover", extended):
+// Permissive-policy sub-case. The "all" mechanism is the catch-all that ends a
+// well-formed SPF record (RFC 7208 §5.1); its qualifier decides the result for
+// any sender not matched by an earlier mechanism: "-all" (Fail, the secure
+// default), "~all" (SoftFail), "?all" (Neutral), and "+all" (Pass). A "+all"
+// policy — or a bare "all", which §4.6.2 treats as "+all" — explicitly
+// authorises EVERY host on the internet to send mail as the domain, which
+// defeats the entire purpose of publishing SPF: the domain is fully spoofable
+// and any forged mail passes SPF alignment. This mirrors the DMARC p=none
+// weak-policy sub-case: a present-but-toothless email-authentication record. The
+// offending token is carried in SPFAll and the finding is keyed on the target
+// itself (not an external domain), so it is emitted once per record.
+//
+// Algorithm:
 //  1. Resolve TXT records (resolver.TXT) and extract the SPF policy.
-//  2. Parse include: mechanisms and the redirect= modifier, recursing up to
-//     maxSPFDepth.
-//  3. For each referenced domain, check whether it is NXDOMAIN (claimable).
-//  4. If a referenced domain is unregistered, emit a finding with
-//     Vector=VectorSPF and Confidence=Potential.
+//  2. If the record's all mechanism qualifies as Pass, emit a Potential
+//     permissive finding keyed on the target.
+//  3. Parse include: mechanisms and the redirect= modifier, recursing up to
+//     maxSPFDepth; for each referenced domain that is NXDOMAIN (claimable), emit
+//     a Potential dangling finding.
 func SPF(ctx context.Context, target string, r *resolver.Resolver) ([]finding.Finding, error) {
 	txts, err := r.TXT(ctx, target)
 	if err != nil || len(txts) == 0 {
@@ -48,8 +61,43 @@ func SPF(ctx context.Context, target string, r *resolver.Resolver) ([]finding.Fi
 		return nil, nil
 	}
 
+	var findings []finding.Finding
+
+	// Permissive-policy sub-case: a Pass-qualified "all" mechanism authorises any
+	// sender. Keyed on the target itself, so it is emitted once per record. This
+	// is checked only against the apex record (not recursed includes): the all
+	// mechanism that governs the scanned name is the one in its own record.
+	if token := spfPermissiveAll(spfRecord); token != "" {
+		findings = append(findings, finding.Finding{
+			Subdomain:  target,
+			Vector:     finding.VectorSPF,
+			Confidence: finding.Potential,
+			SPFAll:     token,
+			Evidence:   "SPF policy ends in " + token + " (Pass — authorises any host to send mail as the domain; domain is spoofable)",
+		})
+	}
+
 	visited := map[string]bool{target: true}
-	return spfIncludes(ctx, spfRecord, r, visited, 0)
+	dangling, _ := spfIncludes(ctx, spfRecord, r, visited, 0)
+	findings = append(findings, dangling...)
+	return findings, nil
+}
+
+// spfPermissiveAll reports the offending "all" mechanism token when an SPF
+// record's catch-all qualifies as Pass, or "" when it does not. An "all"
+// mechanism may carry a qualifier prefix: "+" (Pass), "-" (Fail), "~" (SoftFail),
+// or "?" (Neutral). A missing qualifier defaults to "+" (Pass) per RFC 7208
+// §4.6.2, so a bare "all" is as permissive as "+all". Only "+all" / "all" are
+// flagged; "-all", "~all", and "?all" are secure-to-cautious and never flagged.
+// The mechanism name is matched case-insensitively (qualifiers are not letters).
+func spfPermissiveAll(record string) string {
+	for _, field := range strings.Fields(record) {
+		switch {
+		case strings.EqualFold(field, "all"), strings.EqualFold(field, "+all"):
+			return field
+		}
+	}
+	return ""
 }
 
 // extractSPF returns the first TXT record that looks like an SPF policy.

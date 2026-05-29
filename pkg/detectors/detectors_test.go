@@ -1287,6 +1287,147 @@ func TestSPF_LiveRedirectNoFinding(t *testing.T) {
 	}
 }
 
+// TestSPFPermissiveAll is a table-driven check of the permissive-"all" parser:
+// only a Pass-qualified catch-all ("+all" or a bare "all", which RFC 7208
+// §4.6.2 treats as Pass) is flagged; -all/~all/?all and records with no all
+// mechanism are not. The match is case-insensitive on the mechanism name.
+func TestSPFPermissiveAll(t *testing.T) {
+	cases := []struct {
+		record string
+		want   string
+	}{
+		{"v=spf1 include:_spf.example.com -all", ""},     // hard fail — secure
+		{"v=spf1 ip4:10.0.0.0/8 ~all", ""},               // soft fail — cautious
+		{"v=spf1 ?all", ""},                              // neutral
+		{"v=spf1 +all", "+all"},                          // explicit pass — permissive
+		{"v=spf1 mx all", "all"},                         // bare all defaults to +all
+		{"v=spf1 include:_spf.example.com +ALL", "+ALL"}, // case-insensitive
+		{"v=spf1 ip4:1.2.3.0/24", ""},                    // no all mechanism at all
+		{"v=spf1 -all include:_spf.example.com", ""},     // hard fail anywhere
+	}
+	for _, c := range cases {
+		if got := spfPermissiveAll(c.record); got != c.want {
+			t.Errorf("spfPermissiveAll(%q) = %q, want %q", c.record, got, c.want)
+		}
+	}
+}
+
+// TestSPF_PermissiveAllPotential drives the full SPF detector against a record
+// ending in "+all": it must yield exactly one Potential VectorSPF finding keyed
+// on the target (not an external domain), with SPFAll set, SPFInclude empty, and
+// evidence that names the offending mechanism.
+func TestSPF_PermissiveAllPotential(t *testing.T) {
+	const target = "spoofable.example.com"
+	record := "v=spf1 ip4:192.0.2.0/24 +all"
+
+	addr, cleanup := spfDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Vector != finding.VectorSPF {
+		t.Errorf("vector: got %q, want spf", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("confidence: got %q, want POTENTIAL", f.Confidence)
+	}
+	if f.Subdomain != target {
+		t.Errorf("subdomain: got %q, want the target %q (permissive sub-case is keyed on the target)", f.Subdomain, target)
+	}
+	if f.SPFAll != "+all" {
+		t.Errorf("spf_all: got %q, want %q", f.SPFAll, "+all")
+	}
+	if f.SPFInclude != "" {
+		t.Errorf("spf_include: got %q, want empty for the permissive sub-case", f.SPFInclude)
+	}
+	if !strings.Contains(f.Evidence, "+all") {
+		t.Errorf("evidence: got %q, want it to mention +all", f.Evidence)
+	}
+}
+
+// TestSPF_HardFailAllNoFinding verifies that the secure "-all" catch-all yields
+// no permissive finding.
+func TestSPF_HardFailAllNoFinding(t *testing.T) {
+	const target = "secure.example.com"
+	record := "v=spf1 ip4:192.0.2.0/24 -all"
+
+	addr, cleanup := spfDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings for a -all policy, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestSPF_PermissiveAndDanglingBothFire confirms the permissive-policy and
+// dangling-reference sub-cases are independent and can both fire for one record:
+// a "+all" policy that also includes an NXDOMAIN domain yields two findings.
+func TestSPF_PermissiveAndDanglingBothFire(t *testing.T) {
+	const (
+		target   = "doubly-broken.example.com"
+		danglDom = "_spf.deleted-vendor.invalid"
+	)
+	record := "v=spf1 include:" + danglDom + " +all"
+
+	addr, cleanup := spfDNSServer(t, target, record, danglDom)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings (permissive + dangling), got %d: %+v", len(findings), findings)
+	}
+
+	var sawPermissive, sawDangling bool
+	for _, f := range findings {
+		if f.Vector != finding.VectorSPF {
+			t.Errorf("vector: got %q, want spf", f.Vector)
+		}
+		switch {
+		case f.SPFAll != "":
+			sawPermissive = true
+			if f.Subdomain != target {
+				t.Errorf("permissive finding subdomain: got %q, want %q", f.Subdomain, target)
+			}
+		case f.SPFInclude != "":
+			sawDangling = true
+			if f.SPFInclude != danglDom {
+				t.Errorf("dangling finding spf_include: got %q, want %q", f.SPFInclude, danglDom)
+			}
+		}
+	}
+	if !sawPermissive {
+		t.Error("expected a permissive-policy finding (SPFAll set)")
+	}
+	if !sawDangling {
+		t.Error("expected a dangling-reference finding (SPFInclude set)")
+	}
+}
+
 // ---- DKIM weak inline key sub-vector ---------------------------------------
 
 // Pre-generated RSA public keys (base64 DER SubjectPublicKeyInfo, the RFC 6376

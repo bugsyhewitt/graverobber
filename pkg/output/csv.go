@@ -101,7 +101,15 @@ func csvTarget(f finding.Finding) string {
 	case finding.VectorCNAME:
 		return f.CNAME
 	case finding.VectorSPF:
-		return f.SPFInclude
+		if f.SPFInclude != "" {
+			return f.SPFInclude
+		}
+		// Permissive sub-case has no remote target; the offending mechanism token
+		// is the actionable datum (the subdomain column names the spoofable domain).
+		if f.SPFAll != "" {
+			return f.SPFAll + " (permissive)"
+		}
+		return ""
 	case finding.VectorNS:
 		return strings.Join(f.Nameservers, " ")
 	case finding.VectorMX:

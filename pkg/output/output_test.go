@@ -99,6 +99,14 @@ func TestTerminalWriter_RendersDetailForEveryVector(t *testing.T) {
 			wantSub: []string{"example.com", "claimable.net"},
 		},
 		{
+			name: "spf-permissive-all",
+			f: finding.Finding{
+				Subdomain: "spoofable.example.com", Vector: finding.VectorSPF,
+				Confidence: finding.Potential, SPFAll: "+all",
+			},
+			wantSub: []string{"spoofable.example.com", "+all", "permissive"},
+		},
+		{
 			name: "ns",
 			f: finding.Finding{
 				Subdomain: "example.com", Vector: finding.VectorNS,
