@@ -254,12 +254,12 @@ func runScan(ctx context.Context, f *cliFlags) error {
 	}
 	findings := sc.Run(ctx, targets)
 
-	var count int
+	var summary scanSummary
 	for fnd := range findings {
 		if err := w.Write(fnd); err != nil {
 			return fmt.Errorf("write finding: %w", err)
 		}
-		count++
+		summary.tally(fnd)
 	}
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("flush output: %w", err)
@@ -271,12 +271,79 @@ func runScan(ctx context.Context, f *cliFlags) error {
 		return err
 	}
 	if !f.silent && !f.json && !f.sarif && !f.csv {
-		fmt.Fprintf(os.Stderr, "graverobber: %d finding(s)\n", count)
+		summary.write(os.Stderr)
 	}
-	if count > 0 {
+	if summary.total > 0 {
 		return errFindings
 	}
 	return nil
+}
+
+// scanSummary accumulates a per-tier and per-vector tally of emitted findings so
+// the human-readable (non-machine) run can close with a triage breakdown rather
+// than a bare count. It is written to stderr only — the JSONL/SARIF/CSV wire
+// contracts on stdout are untouched, and --silent suppresses it entirely.
+type scanSummary struct {
+	total    int
+	byTier   map[finding.Confidence]int
+	byVector map[finding.Vector]int
+}
+
+// tally records one finding. It lazily initialises the maps so a zero
+// scanSummary is usable.
+func (s *scanSummary) tally(f finding.Finding) {
+	s.total++
+	if s.byTier == nil {
+		s.byTier = make(map[finding.Confidence]int)
+		s.byVector = make(map[finding.Vector]int)
+	}
+	s.byTier[f.Confidence]++
+	s.byVector[f.Vector]++
+}
+
+// summaryTierOrder fixes the tier columns from strongest to weakest so the
+// breakdown reads the way an operator triages: confirmed first.
+var summaryTierOrder = []finding.Confidence{finding.Confirmed, finding.Likely, finding.Potential}
+
+// summaryVectorOrder fixes the vector columns to the detector pipeline order so
+// the breakdown is stable across runs regardless of which vector emitted first.
+var summaryVectorOrder = []finding.Vector{
+	finding.VectorCNAME, finding.VectorNS, finding.VectorSPF,
+	finding.VectorMX, finding.VectorDKIM, finding.VectorDMARC,
+}
+
+// write renders the summary to w. With no findings it prints the bare count line
+// (preserving the prior behaviour). With findings it adds a tier breakdown and a
+// vector breakdown, each listing only the categories that actually occurred so a
+// scan that exercised a subset of vectors stays uncluttered.
+func (s *scanSummary) write(w io.Writer) {
+	fmt.Fprintf(w, "graverobber: %d finding(s)\n", s.total)
+	if s.total == 0 {
+		return
+	}
+	if tiers := summaryParts(summaryTierOrder, func(c finding.Confidence) (string, int) {
+		return string(c), s.byTier[c]
+	}); tiers != "" {
+		fmt.Fprintf(w, "  by tier:   %s\n", tiers)
+	}
+	if vectors := summaryParts(summaryVectorOrder, func(v finding.Vector) (string, int) {
+		return string(v), s.byVector[v]
+	}); vectors != "" {
+		fmt.Fprintf(w, "  by vector: %s\n", vectors)
+	}
+}
+
+// summaryParts joins the non-zero "label=count" pairs for keys, in the given
+// order, into a "  " separated string. It is generic over the key type so tier
+// and vector breakdowns share one renderer.
+func summaryParts[K comparable](keys []K, get func(K) (string, int)) string {
+	var parts []string
+	for _, k := range keys {
+		if label, n := get(k); n > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", label, n))
+		}
+	}
+	return strings.Join(parts, "  ")
 }
 
 // loadDB assembles the fingerprint database: the on-disk cache when available
