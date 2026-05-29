@@ -1,15 +1,17 @@
 # graverobber
 
-**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records.**
+**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer misconfiguration.**
 
 > Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, DKIM,
-> and DMARC takeover detection in one pipeline-friendly Go binary.
+> and DMARC takeover detection plus unauthenticated AXFR zone-transfer discovery
+> in one pipeline-friendly Go binary.
 
 `graverobber` is the only maintained Go binary that covers **CNAME**, **NS**,
-**SPF**, **MX**, **DKIM**, and **DMARC** takeover vectors in a single tool. It is a static
-binary with no runtime, reads targets from stdin/file/flag, streams JSONL, and
-uses the exit-code conventions of the `httpx`/`subfinder` family so it drops
-straight into a recon pipeline.
+**SPF**, **MX**, **DKIM**, and **DMARC** takeover vectors plus **AXFR**
+zone-transfer misconfiguration in a single tool. It is a static binary with no
+runtime, reads targets from stdin/file/flag, streams JSONL, and uses the
+exit-code conventions of the `httpx`/`subfinder` family so it drops straight into
+a recon pipeline.
 
 ---
 
@@ -23,10 +25,13 @@ straight into a recon pipeline.
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an ESP resource that is now NXDOMAIN | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024) |
 | DMARC | A `_dmarc` policy's `rua=`/`ruf=` report domain is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon |
+| AXFR  | A delegated nameserver allows an unauthenticated zone transfer, leaking every record | Classic DNS misconfiguration; force-multiplier for every other vector |
 
 Most scanners cover CNAME only. NS, SPF, MX, DKIM, and DMARC takeover are live,
 actively-exploited vectors that almost no Go tool handles. Together SPF, DKIM,
-MX, and DMARC cover the complete email-authentication takeover surface.
+MX, and DMARC cover the complete email-authentication takeover surface. AXFR adds
+the classic zone-transfer leak: a single misconfigured nameserver hands an
+attacker the full subdomain list to feed back through every other vector.
 
 ---
 
@@ -70,7 +75,7 @@ graverobber -l subs.txt --fingerprints ~/private.json
 graverobber -l subs.txt --offline
 
 # Skip vectors
-graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc
+graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr
 
 # Probe a custom set of DKIM selectors instead of the built-in ESP defaults
 graverobber -l subs.txt --selectors default,google,s1,s2,k1
@@ -220,6 +225,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-mx` | false | Skip MX dangling-record checks |
 | `--no-dkim` | false | Skip DKIM selector dangling-CNAME checks |
 | `--no-dmarc` | false | Skip DMARC report-domain dangling checks |
+| `--no-axfr` | false | Skip AXFR zone-transfer misconfiguration checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
 | `--offline` | false | Cached/embedded fingerprints only, no network |
@@ -311,6 +317,27 @@ comma-separated lists, mixed case, and `!size` limits), and probes each report
 domain. A domain that is `NXDOMAIN` yields a `POTENTIAL` `dmarc` finding — a
 DNS-only signal with no fingerprint, classified like the SPF `include:` vector.
 
+### AXFR zone-transfer misconfiguration (`--no-axfr`)
+
+A DNS zone transfer (AXFR) is the mechanism a secondary nameserver uses to pull a
+full copy of a zone from the primary. It is meant to be restricted to authorised
+secondaries by IP allow-list or TSIG. A nameserver that answers an AXFR from
+**any** client is misconfigured: it streams the entire zone — every subdomain,
+internal hostname, mail and infrastructure record — to whoever asks.
+
+This is a direct information disclosure and a force-multiplier for every other
+graverobber vector: one permissive nameserver hands an attacker the complete
+subdomain list, which can then be fed straight back through the CNAME, NS, SPF,
+MX, DKIM, and DMARC checks to find the dangling records inside it.
+
+graverobber resolves the target's delegated `NS` records, then attempts an
+unauthenticated AXFR (TCP) against each. A nameserver that **refuses** (the
+correct, secure response) is skipped silently; the first nameserver that returns
+zone data yields a `CONFIRMED` `axfr` finding naming that nameserver, the number
+of records leaked, and a capped sample of the exposed hostnames (`leaked_hosts`).
+graverobber only reads the zone to confirm and sample the leak — it never writes,
+modifies, or persists the transferred records.
+
 ---
 
 ## Confidence model
@@ -332,6 +359,7 @@ JSONL — one finding per line:
 ```json
 {"subdomain":"dev.example.com","vector":"cname","service":"AWS/S3","confidence":"CONFIRMED","cname":"example.s3.amazonaws.com","fingerprint":"The specified bucket does not exist","scheme":"https","timestamp":"2026-05-16T12:34:56Z"}
 {"subdomain":"reports.deleted-vendor.net","vector":"dmarc","confidence":"POTENTIAL","dmarc_uri":"reports.deleted-vendor.net","evidence":"DMARC rua/ruf report domain is NXDOMAIN (claimable — report interception)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"example.com","vector":"axfr","service":"ns1.example.com","confidence":"CONFIRMED","nameservers":["ns1.example.com"],"leaked_hosts":["admin.example.com","vpn.example.com"],"evidence":"nameserver ns1.example.com allowed unauthenticated AXFR (412 records leaked; sample: admin.example.com, vpn.example.com)","timestamp":"2026-05-28T12:00:00Z"}
 ```
 
 Without `--json`, findings render as one coloured human-readable line per
@@ -339,8 +367,9 @@ finding. Each line carries the confidence tier, the vector tag, the subdomain,
 and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
 `include:` domain (`spf`), the failed nameservers (`ns`), the dangling
 mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation
-(`dkim`), or the claimable `rua`/`ruf` report domain (`dmarc`). ANSI colour is
-emitted only to a TTY; piped or file output is plain text.
+(`dkim`), the claimable `rua`/`ruf` report domain (`dmarc`), or the leaking
+nameserver and leaked-host count (`axfr`). ANSI colour is emitted only to a TTY;
+piped or file output is plain text.
 
 When the scan finishes, the human-readable mode closes with a triage summary on
 stderr: the total count, then a breakdown by confidence tier (strongest first)
@@ -403,13 +432,15 @@ subfinder -d example.com -silent | graverobber --csv -o takeovers.csv
 timestamp,subdomain,vector,confidence,service,target,scheme,fingerprint,evidence
 2026-05-28T12:00:00Z,dev.example.com,cname,CONFIRMED,AWS/S3,example.s3.amazonaws.com,https,The specified bucket does not exist,
 2026-05-28T12:00:00Z,reports.deleted-vendor.net,dmarc,POTENTIAL,,reports.deleted-vendor.net,,,DMARC rua/ruf report domain is NXDOMAIN
+2026-05-28T12:00:00Z,example.com,axfr,CONFIRMED,ns1.example.com,ns1.example.com,,,nameserver ns1.example.com allowed unauthenticated AXFR
 ```
 
 Every vector maps onto the same columns; the vector-specific dangling target
-(CNAME, SPF `include:`, NS/MX hosts, DKIM selector delegation, or DMARC report
-domain) is normalised into the single `target` column so the whole sheet sorts
-and filters uniformly. `--csv` is mutually exclusive with `--json` and
-`--sarif`. A scan with zero findings still emits a valid header-only file.
+(CNAME, SPF `include:`, NS/MX hosts, DKIM selector delegation, DMARC report
+domain, or the leaking AXFR nameserver) is normalised into the single `target`
+column so the whole sheet sorts and filters uniformly. `--csv` is mutually
+exclusive with `--json` and `--sarif`. A scan with zero findings still emits a
+valid header-only file.
 
 ### Exit codes
 

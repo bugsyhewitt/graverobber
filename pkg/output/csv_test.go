@@ -109,6 +109,7 @@ func TestCSV_TargetColumnPerVector(t *testing.T) {
 		{"mx", finding.Finding{Vector: finding.VectorMX, MXHosts: []string{"mail.gone.net"}}, "mail.gone.net"},
 		{"dkim", finding.Finding{Vector: finding.VectorDKIM, DKIMSelector: "s1", CNAME: "s1.domainkey.gone.sendgrid.net"}, "s1._domainkey -> s1.domainkey.gone.sendgrid.net"},
 		{"dmarc", finding.Finding{Vector: finding.VectorDMARC, DMARCURI: "reports.gone.net"}, "reports.gone.net"},
+		{"axfr", finding.Finding{Vector: finding.VectorAXFR, Service: "ns1.example.com", Nameservers: []string{"ns1.example.com"}}, "ns1.example.com"},
 	}
 	ti := colIndex(t, "target")
 	for _, tc := range cases {

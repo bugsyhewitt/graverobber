@@ -117,6 +117,10 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		if f.DMARCURI != "" {
 			detail = fmt.Sprintf("dmarc rua/ruf:%s", f.DMARCURI)
 		}
+	case finding.VectorAXFR:
+		if f.Service != "" {
+			detail = fmt.Sprintf("axfr %s leaked %d host(s)", f.Service, len(f.LeakedHosts))
+		}
 	}
 
 	_, err := fmt.Fprintf(t.w, "[%s] [%s] %s  %s\n",

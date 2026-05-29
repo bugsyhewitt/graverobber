@@ -100,6 +100,10 @@ func TestRun_TerminatesWithEmptyDB(t *testing.T) {
 		Timeout:     500 * time.Millisecond,
 		NoNS:        true,
 		NoSPF:       true,
+		NoMX:        true,
+		NoDKIM:      true,
+		NoDMARC:     true,
+		NoAXFR:      true,
 	})
 
 	targets := make(chan string, 3)
@@ -166,9 +170,10 @@ func TestRun_VectorsRunConcurrently(t *testing.T) {
 	}
 	// Single worker, single target: any concurrency observed must come from the
 	// per-target vector fan-out, not from multiple workers or targets. MX,
-	// DKIM, and DMARC are disabled so the timing measures only the three stubbed
-	// vectors (the real detectors would otherwise hit DNS and skew the clock).
-	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true, NoDMARC: true})
+	// DKIM, DMARC, and AXFR are disabled so the timing measures only the three
+	// stubbed vectors (the real detectors would otherwise hit DNS and skew the
+	// clock).
+	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true, NoDMARC: true, NoAXFR: true})
 
 	targets := make(chan string, 1)
 	targets <- "sub.example.com"
@@ -224,7 +229,7 @@ func TestRun_DisabledVectorsAreNotRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load db: %v", err)
 	}
-	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoNS: true, NoSPF: true})
+	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoNS: true, NoSPF: true, NoMX: true, NoDKIM: true, NoDMARC: true, NoAXFR: true})
 
 	targets := make(chan string, 1)
 	targets <- "sub.example.com"
@@ -268,8 +273,8 @@ func TestRun_AllVectorFindingsAreEmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load db: %v", err)
 	}
-	// Disable MX/DKIM/DMARC so the emitted set is exactly the three stubbed vectors.
-	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true, NoDMARC: true})
+	// Disable MX/DKIM/DMARC/AXFR so the emitted set is exactly the three stubbed vectors.
+	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true, NoDMARC: true, NoAXFR: true})
 
 	targets := make(chan string, 1)
 	targets <- "sub.example.com"
@@ -319,6 +324,9 @@ func TestRun_NoMXDisablesMXVector(t *testing.T) {
 			NoNS:        true,
 			NoSPF:       true,
 			NoMX:        noMX,
+			NoDKIM:      true,
+			NoDMARC:     true,
+			NoAXFR:      true,
 		})
 		targets := make(chan string, 1)
 		targets <- "sub.example.com"
@@ -365,6 +373,8 @@ func TestRun_NoDKIMDisablesDKIMVector(t *testing.T) {
 			NoSPF:       true,
 			NoMX:        true,
 			NoDKIM:      noDKIM,
+			NoDMARC:     true,
+			NoAXFR:      true,
 		})
 		targets := make(chan string, 1)
 		targets <- "sub.example.com"
@@ -412,6 +422,7 @@ func TestRun_NoDMARCDisablesDMARCVector(t *testing.T) {
 			NoMX:        true,
 			NoDKIM:      true,
 			NoDMARC:     noDMARC,
+			NoAXFR:      true,
 		})
 		targets := make(chan string, 1)
 		targets <- "sub.example.com"
@@ -428,6 +439,54 @@ func TestRun_NoDMARCDisablesDMARCVector(t *testing.T) {
 	}
 	if got := runWith(false); got != 1 {
 		t.Errorf("NoDMARC=false: dmarcVector called %d times, want 1", got)
+	}
+}
+
+// TestRun_NoAXFRDisablesAXFRVector verifies that when NoAXFR is set the
+// axfrVector function is not called, and that when NoAXFR is false it is called
+// once. AXFR is opt-out (on by default), mirroring the other DNS vectors.
+func TestRun_NoAXFRDisablesAXFRVector(t *testing.T) {
+	origAXFR := axfrVector
+	t.Cleanup(func() { axfrVector = origAXFR })
+
+	var axfrCalls int32
+	axfrVector = func(_ context.Context, _ *Scanner, _ string) ([]finding.Finding, error) {
+		atomic.AddInt32(&axfrCalls, 1)
+		return nil, nil
+	}
+
+	db, err := fingerprints.Load([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("load db: %v", err)
+	}
+
+	runWith := func(noAXFR bool) int32 {
+		atomic.StoreInt32(&axfrCalls, 0)
+		sc := New(db, Options{
+			Concurrency: 1,
+			Timeout:     200 * time.Millisecond,
+			NoNS:        true,
+			NoSPF:       true,
+			NoMX:        true,
+			NoDKIM:      true,
+			NoDMARC:     true,
+			NoAXFR:      noAXFR,
+		})
+		targets := make(chan string, 1)
+		targets <- "sub.example.com"
+		close(targets)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		for range sc.Run(ctx, targets) {
+		}
+		return atomic.LoadInt32(&axfrCalls)
+	}
+
+	if got := runWith(true); got != 0 {
+		t.Errorf("NoAXFR=true: axfrVector called %d times, want 0", got)
+	}
+	if got := runWith(false); got != 1 {
+		t.Errorf("NoAXFR=false: axfrVector called %d times, want 1", got)
 	}
 }
 
@@ -464,6 +523,7 @@ func TestRun_MinConfidenceFiltersWeakerFindings(t *testing.T) {
 			NoMX:          true,
 			NoDKIM:        true,
 			NoDMARC:       true,
+			NoAXFR:        true,
 			MinConfidence: min,
 		})
 		targets := make(chan string, 1)
@@ -543,6 +603,10 @@ func TestRun_SecondRunDeduplicationIsIndependentOfFirst(t *testing.T) {
 		Timeout:     200 * time.Millisecond,
 		NoNS:        true,
 		NoSPF:       true,
+		NoMX:        true,
+		NoDKIM:      true,
+		NoDMARC:     true,
+		NoAXFR:      true,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -409,6 +409,60 @@ lines, a small mutual-exclusion generalisation, README section, seven tests.
 
 ---
 
+## Rank 12 — AXFR zone-transfer misconfiguration (seventh vector) — ✅ IMPLEMENTED (Phase 2, Rotation 15)
+
+**Status:** Shipped. Ranks 1–11 exhausted the original research roadmap (six
+takeover vectors, active verification, terminal/SARIF/CSV output) and R14 added
+the end-of-scan triage summary. With the email-authentication surface complete
+and the output story closed, the next natural gap is a new **DNS attack-surface**
+vector rather than more output plumbing.
+
+`detectors.AXFR` adds `VectorAXFR` ("axfr") as the seventh vector. It is the
+secure-vs-misconfigured sibling of the NS vector: NS asks "is the hosted zone
+deleted?"; AXFR asks "will the live nameservers hand me the whole zone?". Both
+start from the same delegated NS set. The detector resolves the target's `NS`
+records, then attempts an unauthenticated AXFR (TCP) against each via the new
+`resolver.ZoneTransfer`; the first nameserver that streams zone data yields a
+`CONFIRMED` `axfr` finding naming that nameserver, the record count, and a
+deduplicated, sorted, capped sample of the leaked owner names (new
+`LeakedHosts` / `leaked_hosts` field). A nameserver that refuses
+(`ErrAXFRRefused`, the secure response) or fails at the transport level is
+skipped — only an actual transfer is a finding, so there are no false positives.
+
+**Why this vector:** An open AXFR is a classic, high-signal DNS misconfiguration
+that is both a direct information disclosure and a force-multiplier for every
+other graverobber vector — one permissive nameserver leaks the complete subdomain
+list, which feeds straight back through CNAME/NS/SPF/MX/DKIM/DMARC to find the
+dangling records inside it. It is fully on-ethos: DNS-only, no credentials, no
+new dependencies (miekg/dns already ships `Transfer`), and pipeline-friendly. The
+detector only reads the zone to confirm and sample the leak; it never writes,
+modifies, or persists the records, and the transfer is bounded
+(`maxAXFRRecords` / `maxAXFRHostsSampled`) so a large zone cannot exhaust memory
+in a 50-worker scan.
+
+Wired into the scanner fan-out behind `Options.NoAXFR` / `--no-axfr` (opt-out,
+on by default). All four output paths render it: terminal detail
+(`axfr <ns> leaked N host(s)`), JSONL (the full `Finding` with `leaked_hosts`),
+SARIF (a `graverobber/axfr` rule, `CONFIRMED → error`), and CSV (the leaking
+nameserver in the `target` column).
+
+Guarded by `TestZoneTransfer_LeakReturnsRecords`,
+`TestZoneTransfer_RefusedIsErrAXFRRefused`, `TestZoneTransfer_SOAOnlyIsRefused`,
+`TestZoneTransfer_TransportErrorIsNotRefusal` (resolver), `TestAXFR_LeakConfirmed`,
+`TestAXFR_RefusedNoFinding`, `TestAXFR_NoNameserversNoFinding`,
+`TestAXFRFinding_VectorConstant` (detectors), `TestRun_NoAXFRDisablesAXFRVector`
+(scanner), and new AXFR cases in the table-driven terminal/CSV/SARIF tests. The
+detector tests use a hermetic local AXFR server via the test-only
+`resolver.SetAXFRPortForTest` seam (mirroring the `soaBackoff` testability
+pattern) so no privileged port 53 or live network is required.
+
+**Complexity:** Medium — one resolver primitive (`ZoneTransfer` +
+`ZoneTransferResult`), one new detector file, two schema additions
+(`VectorAXFR`, `LeakedHosts`), scanner option + CLI flag, four output-path arms,
+README sections.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -440,3 +494,4 @@ lines, a small mutual-exclusion generalisation, README section, seven tests.
 | 9 | Terminal output detail for MX/DKIM/DMARC ✅ | Low | High (default-mode correctness) | No |
 | 10 | SARIF 2.1.0 output for CI / Code Scanning ✅ | Low-Med | High (CI integration) | No (new flag only) |
 | 11 | CSV output for spreadsheet / ticket triage ✅ | Low | Med-High (analyst triage) | No (new flag only) |
+| 12 | AXFR zone-transfer misconfiguration (7th vector) ✅ | Medium | High (new DNS surface, force-multiplier) | Yes (new vector + flag) |

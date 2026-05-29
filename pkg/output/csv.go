@@ -113,6 +113,9 @@ func csvTarget(f finding.Finding) string {
 		return f.CNAME
 	case finding.VectorDMARC:
 		return f.DMARCURI
+	case finding.VectorAXFR:
+		// The leaking nameserver is the actionable target; Service holds it.
+		return f.Service
 	default:
 		return ""
 	}
