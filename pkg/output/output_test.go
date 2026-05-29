@@ -140,6 +140,14 @@ func TestTerminalWriter_RendersDetailForEveryVector(t *testing.T) {
 			wantSub: []string{"example.com", "reports.gone.net"},
 		},
 		{
+			name: "dmarc-weak-policy",
+			f: finding.Finding{
+				Subdomain: "example.com", Vector: finding.VectorDMARC,
+				Confidence: finding.Potential, DMARCPolicy: "none",
+			},
+			wantSub: []string{"example.com", "p=none"},
+		},
+		{
 			name: "axfr",
 			f: finding.Finding{
 				Subdomain: "example.com", Vector: finding.VectorAXFR,

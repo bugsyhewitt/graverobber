@@ -557,6 +557,72 @@ roadmap updates, seven new tests. No API, scanner, or flag change.
 
 ---
 
+## Rank 15 — DMARC monitor-only (`p=none`) policy detection — ✅ IMPLEMENTED (Phase 2, Rotation 18)
+
+**Status:** Shipped. Ranks 1–14 covered the seven takeover vectors, active
+verification, the full output story (terminal/JSONL/SARIF/CSV + triage summary),
+and closed the SPF (`redirect=`) and DKIM (weak inline key) surfaces. The
+next-highest-value gap was, like R16 and R17, a **completeness hole inside an
+existing vector**: the DMARC detector only inspected the `rua=`/`ruf=` *report
+domains* (the dangling-report-interception case) and never read the `p=` policy
+tag — so it silently passed over the most common, most exploited DMARC
+weakness of all: a **monitor-only `p=none` policy**.
+
+A `p=none` policy instructs receivers to take **no action** on a message that
+fails DMARC alignment (RFC 7489 §6.3): spoofed mail that fails both SPF and DKIM
+is delivered to the inbox anyway. `p=none` is the deployment-bootstrap state, not
+a destination — a domain that publishes it indefinitely is spoofable by anyone,
+which is the precondition every business-email-compromise and phishing campaign
+relies on. Before this rotation a domain with `v=DMARC1; p=none` and no dangling
+report address produced **zero findings**, despite being trivially spoofable.
+
+`detectors.DMARC` now parses the `p=` tag via the new `dmarcPolicy` helper
+(case-insensitive on tag and value, order-independent, and careful not to let the
+subdomain-policy `sp=` tag shadow `p=`). When the policy is `none` it emits a
+`POTENTIAL` `dmarc` finding keyed on the **target itself** (not a report domain),
+carrying the policy token in the new `DMARCPolicy` (`dmarc_policy`) field. The
+finding's `Evidence` distinguishes the merely-weak case (`p=none` with reporting)
+from the worse no-visibility case (`p=none` **without** a `rua=` aggregate
+address — neither enforcement nor visibility). Enforcing policies (`p=reject`,
+`p=quarantine`) are never flagged, and the weak-policy and dangling-report
+sub-cases fire independently and can both appear for the same record. Confidence
+is `POTENTIAL`: a DNS-only policy-weakness signal with no fingerprint match,
+consistent with the existing DMARC/SPF classification. The two DMARC sub-cases
+are distinguished by which of `DMARCPolicy` / `DMARCURI` is set.
+
+All four output paths render the new sub-case (terminal/CSV/SARIF detail show
+`dmarc policy p=none (monitor-only)`; JSONL serialises `dmarc_policy`); the SARIF
+`graverobber/dmarc` rule title and description now cover both DMARC weaknesses.
+
+**Why this over a new vector:** Every high-value vector *class* already ships;
+the marginal value is correctness-within-coverage. A detector that parses a DMARC
+record but checks only half of the documented DMARC weaknesses — ignoring the
+single most common one — is a higher-impact, lower-risk fix than a new vector. It
+requires no new flag (folded into the existing `--no-dmarc`), no new resolver
+primitive (reuses the `TXT` already fetched), and no new dependency. Fully
+on-ethos: DNS-only, credential-free, pipeline-friendly.
+
+**Schema:** new `DMARCPolicy string` (`json:"dmarc_policy,omitempty"`) on
+`Finding`. No new flag.
+
+Guarded by `TestDMARCPolicy` (table-driven parse: each enforcement level,
+case-insensitivity, tag ordering, `sp=` non-shadowing, absence, non-DMARC),
+`TestDMARC_WeakPolicyPotential` (full detector against a hermetic local DNS
+server — one POTENTIAL finding keyed on the target, `DMARCPolicy=none`,
+`DMARCURI` empty), `TestDMARC_WeakPolicyNoReportingEvidence` (evidence calls out
+the missing `rua=`), `TestDMARC_StrongPolicyNoWeakFinding` (`p=reject` /
+`p=quarantine` yield nothing), and `TestDMARC_WeakPolicyAndDanglingReport` (both
+sub-cases fire together), plus a new `dmarc-weak-policy` case in the table-driven
+terminal output test. The pre-existing `TestDMARC_LiveReportDomainNoFinding`
+fixture was switched from `p=none` to `p=reject` so it continues to isolate the
+dangling-report path.
+
+**Complexity:** Low — one `p=` parse helper + one finding branch in
+`pkg/detectors/dmarc.go`, one schema field, three output-detail arms, README +
+roadmap updates, five new tests. No API, scanner, or flag change.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -591,3 +657,4 @@ roadmap updates, seven new tests. No API, scanner, or flag change.
 | 12 | AXFR zone-transfer misconfiguration (7th vector) ✅ | Medium | High (new DNS surface, force-multiplier) | Yes (new vector + flag) |
 | 13 | SPF `redirect=` modifier dangling detection ✅ | Low | High (completes SPF coverage, same takeover) | No |
 | 14 | DKIM weak inline-key detection ✅ | Low | High (completes DKIM coverage, forgeable signatures) | Yes (new field, no flag) |
+| 15 | DMARC monitor-only (`p=none`) policy detection ✅ | Low | High (completes DMARC coverage, spoofable domain) | Yes (new field, no flag) |

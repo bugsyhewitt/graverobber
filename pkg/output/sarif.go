@@ -142,9 +142,9 @@ var vectorRuleText = map[finding.Vector]struct {
 		"A DKIM selector is either published as a CNAME whose target is NXDOMAIN (an attacker who reclaims the ESP resource can serve a DKIM key that signs spoofed mail) or publishes an inline RSA key below the RFC 8301 1024-bit floor (an attacker who factors the short key can forge DKIM-passing signatures directly). Either way the attacker can sign mail that passes DKIM for the domain.",
 	},
 	finding.VectorDMARC: {
-		"Dangling DMARC report domain takeover",
-		"A DMARC rua/ruf report domain is claimable.",
-		"The DMARC policy's rua/ruf report URI points at an NXDOMAIN domain; an attacker who claims it intercepts every DMARC aggregate/forensic report sent for the domain.",
+		"DMARC policy weakness or dangling report domain",
+		"A DMARC policy is monitor-only (p=none) or names a claimable report domain.",
+		"A DMARC policy is either p=none (monitor-only: receivers take no action on a failed DMARC check, so spoofed mail that fails SPF/DKIM is still delivered — the precondition for business-email-compromise and phishing) or its rua/ruf report URI points at an NXDOMAIN domain (an attacker who claims it intercepts every DMARC aggregate/forensic report sent for the domain).",
 	},
 	finding.VectorAXFR: {
 		"Unauthenticated DNS zone transfer (AXFR)",
@@ -248,7 +248,10 @@ func sarifMessage(f finding.Finding) string {
 			detail = fmt.Sprintf("DKIM %s._domainkey -> %s", f.DKIMSelector, f.CNAME)
 		}
 	case finding.VectorDMARC:
-		if f.DMARCURI != "" {
+		switch {
+		case f.DMARCPolicy != "":
+			detail = "DMARC policy p=" + f.DMARCPolicy + " (monitor-only)"
+		case f.DMARCURI != "":
 			detail = "DMARC rua/ruf:" + f.DMARCURI
 		}
 	case finding.VectorAXFR:

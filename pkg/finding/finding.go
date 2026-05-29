@@ -34,9 +34,15 @@ const (
 	// two cases: zero for the dangling-CNAME case, the modulus size for a weak
 	// inline key.
 	VectorDKIM Vector = "dkim"
-	// VectorDMARC: a DMARC policy at _dmarc.<domain> carries a rua=/ruf= report
-	// URI whose domain is NXDOMAIN — an attacker who claims it intercepts every
-	// DMARC aggregate/forensic report sent for the target.
+	// VectorDMARC: a DMARC policy at _dmarc.<domain> is either weak or dangling.
+	// In the dangling sub-case a rua=/ruf= report URI points at an NXDOMAIN
+	// domain — an attacker who claims it intercepts every DMARC aggregate/
+	// forensic report sent for the target (DMARCURI carries the claimable
+	// domain). In the weak-policy sub-case the published policy is p=none
+	// (monitor-only: receivers take no action on a failed check, so spoofed mail
+	// is delivered unimpeded) — the DMARCPolicy field carries the policy token
+	// and DMARCURI is empty. The two sub-cases are distinguished by which of
+	// DMARCPolicy / DMARCURI is set.
 	VectorDMARC Vector = "dmarc"
 	// VectorAXFR: a delegated nameserver allows an unauthenticated DNS zone
 	// transfer (AXFR), leaking every record in the zone to any client. It is a
@@ -131,9 +137,14 @@ type Finding struct {
 	// the RFC 8301 1024-bit floor. It is zero (omitted) for the dangling-CNAME
 	// sub-case, which is identified instead by the CNAME field.
 	DKIMKeyBits int `json:"dkim_key_bits,omitempty"`
-	// DMARCURI is set for VectorDMARC findings: the claimable rua/ruf report
-	// domain (the part after "mailto:...@").
+	// DMARCURI is set for the dangling-report-domain VectorDMARC sub-case: the
+	// claimable rua/ruf report domain (the part after "mailto:...@").
 	DMARCURI string `json:"dmarc_uri,omitempty"`
+	// DMARCPolicy is set for the weak-policy VectorDMARC sub-case: the policy
+	// token from the p= tag when it is "none" (monitor-only, no enforcement).
+	// It is empty for the dangling-report-domain sub-case, which is identified
+	// instead by the DMARCURI field.
+	DMARCPolicy string `json:"dmarc_policy,omitempty"`
 	// LeakedHosts is set for VectorAXFR findings: a deduplicated, sorted sample
 	// of the owner names exposed by the zone transfer (capped; the full zone is
 	// not serialised). For VectorAXFR, the leaking nameserver is in Service and

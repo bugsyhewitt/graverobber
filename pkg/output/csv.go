@@ -115,6 +115,9 @@ func csvTarget(f finding.Finding) string {
 		}
 		return f.CNAME
 	case finding.VectorDMARC:
+		if f.DMARCPolicy != "" {
+			return fmt.Sprintf("policy p=%s (monitor-only)", f.DMARCPolicy)
+		}
 		return f.DMARCURI
 	case finding.VectorAXFR:
 		// The leaking nameserver is the actionable target; Service holds it.
