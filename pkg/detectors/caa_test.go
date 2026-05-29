@@ -138,6 +138,126 @@ func TestCAA_DanglingIssuerPotential(t *testing.T) {
 	}
 }
 
+// TestCAAIodefHost unit-tests the iodef URL host parser: mailto: yields the host
+// after the "@", http(s):// yields the URL authority host, both lower-cased; other
+// schemes, host-less values, and malformed addresses yield "".
+func TestCAAIodefHost(t *testing.T) {
+	cases := []struct {
+		value string
+		want  string
+	}{
+		{"mailto:sec@reports.example.com", "reports.example.com"},
+		{"mailto:Sec@Reports.Example.COM", "reports.example.com"}, // lower-cased
+		{"MAILTO:sec@reports.example.com", "reports.example.com"}, // scheme case-insensitive
+		{"https://iodef.example.com/report", "iodef.example.com"},
+		{"http://Iodef.Example.com:8080/r", "iodef.example.com"}, // port stripped, lower-cased
+		{"mailto:sec@", ""},              // no host after @
+		{"mailto:nobody", ""},            // no @ at all
+		{"ftp://iodef.example.com/", ""}, // unsupported scheme
+		{"", ""},                         // empty
+		{"   ", ""},                      // whitespace only
+	}
+	for _, c := range cases {
+		if got := caaIodefHost(c.value); got != c.want {
+			t.Errorf("caaIodefHost(%q) = %q, want %q", c.value, got, c.want)
+		}
+	}
+}
+
+// TestCAA_DanglingIodefMailtoPotential drives the full detector: an iodef= tag
+// whose mailto: report host is NXDOMAIN must yield exactly one Potential finding
+// keyed on the target, carrying the claimable report host in CAAIssuer with
+// evidence that names the iodef report-interception case.
+func TestCAA_DanglingIodefMailtoPotential(t *testing.T) {
+	const (
+		target     = "example.com"
+		reportHost = "reports.dead-vendor.invalid"
+	)
+	records := []caaRecord{{tag: "iodef", value: "mailto:sec@" + reportHost}}
+
+	addr, cleanup := caaDNSServer(t, target, records, reportHost)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := CAA(ctx, target, r)
+	if err != nil {
+		t.Fatalf("CAA: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Vector != finding.VectorCAA {
+		t.Errorf("vector: got %q, want caa", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("confidence: got %q, want POTENTIAL", f.Confidence)
+	}
+	if f.CAAIssuer != reportHost {
+		t.Errorf("caa_issuer: got %q, want %q", f.CAAIssuer, reportHost)
+	}
+	if f.Subdomain != target {
+		t.Errorf("subdomain: got %q, want %q (CAA is keyed on the target)", f.Subdomain, target)
+	}
+	if !strings.Contains(f.Evidence, "iodef") {
+		t.Errorf("evidence %q does not name the iodef report-interception case", f.Evidence)
+	}
+}
+
+// TestCAA_DanglingIodefHTTPSPotential verifies the http(s):// iodef variant: a
+// report URL whose host is NXDOMAIN yields one Potential finding carrying the host.
+func TestCAA_DanglingIodefHTTPSPotential(t *testing.T) {
+	const (
+		target     = "example.com"
+		reportHost = "iodef.dead-vendor.invalid"
+	)
+	records := []caaRecord{{tag: "iodef", value: "https://" + reportHost + "/report"}}
+
+	addr, cleanup := caaDNSServer(t, target, records, reportHost)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := CAA(ctx, target, r)
+	if err != nil {
+		t.Fatalf("CAA: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	if findings[0].CAAIssuer != reportHost {
+		t.Errorf("caa_issuer: got %q, want %q", findings[0].CAAIssuer, reportHost)
+	}
+}
+
+// TestCAA_LiveIodefNoFinding verifies that an iodef= tag whose report host
+// resolves (the normal, correctly-configured case) produces no finding.
+func TestCAA_LiveIodefNoFinding(t *testing.T) {
+	const target = "example.com"
+	records := []caaRecord{{tag: "iodef", value: "mailto:sec@reports.example.com"}}
+
+	// nxDomain is an unrelated host, so the report host answers NOERROR (exists).
+	addr, cleanup := caaDNSServer(t, target, records, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := CAA(ctx, target, r)
+	if err != nil {
+		t.Fatalf("CAA: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no findings for a live iodef report host, got %d: %+v", len(findings), findings)
+	}
+}
+
 // TestCAA_PermissiveAnyCAPotential verifies that an issue= tag with value "*"
 // (authorise any CA) yields a Potential permissive finding with no CAAIssuer.
 func TestCAA_PermissiveAnyCAPotential(t *testing.T) {

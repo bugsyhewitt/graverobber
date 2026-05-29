@@ -871,6 +871,67 @@ dependency (uses the existing `miekg/dns` resolver, which already exposes `DS` a
 
 ---
 
+## Rank 20 — CAA `iodef` dangling-report-host detection — ✅ IMPLEMENTED (Phase 2, Rotation 26)
+
+**Status:** Shipped. Rotation 26's directive offered two candidates — a **CAA
+dangling** check or an **SPF include-chain dangling host** check — as the 13th
+vector, with instructions to assess the codebase first. Assessment found **both
+directed candidates already shipped**, so per the directive the next logical
+roadmap improvement was implemented:
+
+- **CAA dangling-issuer is already shipped.** `detectors.CAA` (Rank 16) already
+  resolves every `issue`/`issuewild` CA domain and emits a `POTENTIAL caa`
+  finding for any that is NXDOMAIN (carried in `CAAIssuer`), plus the permissive
+  `*` any-CA case. Re-implementing it would duplicate existing coverage.
+- **SPF include-chain dangling is already shipped.** `detectors.SPF` (the apex
+  detector plus Rank 13's `redirect=` work) already recurses `include:` and
+  `redirect=` references up to `maxSPFDepth` and emits a `POTENTIAL spf` finding
+  for any referenced domain that is NXDOMAIN. Re-implementing it would duplicate
+  existing coverage.
+
+The genuine gap found in the CAA detector: it explicitly **skipped the `iodef`
+tag** (RFC 8659 §4.4), the URL where a CA reports a forbidden issuance attempt.
+The `iodef` value is a `mailto:` address or an `http(s)://` endpoint (RFC 6546);
+if its **host is NXDOMAIN**, an attacker who registers it **intercepts the CAA
+violation reports** — a reconnaissance channel disclosing exactly which CAs are
+being probed against the target's policy (mis-issuance/attack attempts). It is the
+CAA analogue of the DMARC `rua`/`ruf` report-interception case (Rank 8), applied
+to CAA's reporting plane rather than to certificate issuance — the same
+dangling-host family graverobber specialises in.
+
+This was implemented as a **third sub-case of the existing `caa` vector**, not a
+new vector: no new vector constant, no new finding field (reuses `CAAIssuer` for
+the claimable report host), no new CLI flag (covered by the existing `--no-caa`
+opt-out). The detector now branches on the `iodef` tag, parses the report host
+via a new `caaIodefHost` helper (a `mailto:` host-after-`@` parser plus a
+`net/url` `http(s)://` authority parser, mirroring the DMARC mailto parser and the
+BIMI URL parser already in the codebase, with a case-insensitive scheme match),
+and emits a `POTENTIAL caa` finding when the host is NXDOMAIN — using the same
+`CNAMEChain` (TypeA) NXDOMAIN probe as every other dangling-host detector. The
+evidence string distinguishes the report-interception case from the issuance case.
+
+Guarded by 5 new CAA tests (`pkg/detectors/caa_test.go`): the `caaIodefHost`
+parser unit table (mailto/http(s), case-folding, port-strip, unsupported-scheme,
+host-less, empty), full-detector `mailto:` dangling, full-detector `https://`
+dangling, and a live-iodef-no-finding case. The pre-existing
+`TestCAA_LiveIssuerNoFinding` (which already carried a live `iodef` record)
+continues to pass, confirming no regression in the healthy path. Full suite green,
+`go vet` clean. README CAA section, vector summary table, and `--no-caa` flag doc
+updated; `VectorCAA` and `CAAIssuer` doc comments extended to the third sub-case.
+
+**Why this over re-implementing a directed candidate:** both directed candidates
+were already shipped (verified in-code), and the directive instructs picking the
+next logical roadmap improvement in that case. The `iodef` host is a genuinely new,
+exploitable-by-omission, DNS-only signal on a record class the detector already
+parses but previously ignored — closing CAA coverage end to end (issuance +
+reporting + permissive) with zero new API surface.
+
+**Complexity:** Low — one detector branch, one parser helper, no new vector/field/
+flag, 5 new tests, README + doc-comment updates. No new dependency (`net/url` is
+stdlib; the `miekg/dns` resolver already returns `iodef` CAA records).
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -910,3 +971,4 @@ dependency (uses the existing `miekg/dns` resolver, which already exposes `DS` a
 | 17 | Triage summary by-vector completeness (AXFR/CAA) ✅ | Trivial | High (default-mode correctness) | No |
 | 18 | BIMI dangling-asset-host detection (11th vector) ✅ | Low-Med | High (new email-auth-trust surface, brand-impersonation) | Yes (new vector + field + flag) |
 | 19 | DNSSEC orphaned-DS detection (12th vector) ✅ | Low-Med | High (new availability surface, self-inflicted SERVFAIL outage) | Yes (new vector + field + flag) |
+| 20 | CAA `iodef` dangling-report-host detection ✅ | Low | High (completes CAA coverage, report interception) | No (3rd sub-case of `caa`, reuses field + flag) |
