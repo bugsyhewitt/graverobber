@@ -24,7 +24,7 @@ a recon pipeline.
 | SPF   | An SPF `include:`/`redirect=`/`a:`/`mx:` directive points at an unregistered, claimable domain, **or** the policy ends in `+all` (Pass — any host may send mail as the domain) | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day; `+all` = fully spoofable domain |
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, **or** publishes an inline RSA key below the RFC 8301 1024-bit floor | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012) |
-| DMARC | A `_dmarc` policy is monitor-only (`p=none`, spoofable) **or** its `rua=`/`ruf=` report domain is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon; `p=none` spoofing (BEC/phishing precondition) |
+| DMARC | A `_dmarc` policy is monitor-only (`p=none`, spoofable) **or** its `rua=`/`ruf=` report host — a `mailto:` domain or `https:` collector host — is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon; `p=none` spoofing (BEC/phishing precondition) |
 | AXFR  | A delegated nameserver allows an unauthenticated zone transfer, leaking every record | Classic DNS misconfiguration; force-multiplier for every other vector |
 | CAA   | A `CAA` record names a CA domain that is NXDOMAIN and re-claimable, an `iodef` report host that is NXDOMAIN, **or** uses the `*` wildcard authorising any CA to issue | Missing/weak certificate-issuance control → man-in-the-middle TLS; or CAA report interception |
 | TLSA  | A DANE `TLSA` pin at `_25._tcp.<mxhost>` covers an MX host that is NXDOMAIN — a dangling, DNSSEC-authenticated pin | Hard-fails inbound mail from DANE senders; reclaimable mail host → DANE-trusted interception (RFC 7672) |
@@ -258,7 +258,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-spf` | false | Skip SPF `include:`/`redirect=`/`a:`/`mx:` dangling and `+all` permissive-policy checks |
 | `--no-mx` | false | Skip MX dangling-record checks |
 | `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME + weak inline RSA key) |
-| `--no-dmarc` | false | Skip DMARC report-domain dangling checks |
+| `--no-dmarc` | false | Skip DMARC report-host dangling + `p=none` checks |
 | `--no-axfr` | false | Skip AXFR zone-transfer misconfiguration checks |
 | `--no-caa` | false | Skip CAA (Certification Authority Authorization) misconfiguration checks (dangling issuer, dangling `iodef` report host, permissive any-CA) |
 | `--no-tlsa` | false | Skip TLSA dangling-DANE-pin checks |
@@ -399,7 +399,7 @@ The DKIM vector checks two distinct weaknesses per selector:
   floor, non-RSA keys, and explicitly-revoked keys (empty `p=`) are never
   flagged.
 
-### DMARC policy weakness & report-domain takeover (`--no-dmarc`)
+### DMARC policy weakness & report-host takeover (`--no-dmarc`)
 
 graverobber checks the `_dmarc.<domain>` TXT record for **two** distinct
 weaknesses.
@@ -423,26 +423,31 @@ address is configured** — the owner then has neither enforcement nor visibilit
 so an ongoing spoofing campaign is invisible (the `evidence` string calls this
 out). Enforcing policies (`p=reject`, `p=quarantine`) are never flagged.
 
-**2 — Dangling report domain.** A DMARC policy can publish two reporting
-addresses:
+**2 — Dangling report host.** A DMARC policy can publish two reporting
+destinations, each as a comma-separated list of DMARC URIs:
 
 ```
-rua=mailto:aggregate@reports.example.net   (aggregate reports)
-ruf=mailto:forensic@reports.example.net    (failure/forensic reports)
+rua=mailto:aggregate@reports.example.net      (aggregate reports, mailto: transport)
+ruf=mailto:forensic@reports.example.net       (failure/forensic reports, mailto: transport)
+rua=https://collector.vendor.example/ingest   (aggregate reports, https: transport)
 ```
 
-Each `mailto:` URI names a domain that receives mail on the policy owner's
-behalf. If that domain is `NXDOMAIN` — the reporting vendor was decommissioned,
-or the address points at a forgotten internal subdomain whose zone was deleted —
-an attacker who registers or reclaims it **intercepts every DMARC report sent
-for the target**. The reports expose the target's full sending infrastructure,
-which spoofing attempts pass or fail alignment, and source IP reputation: a
-quiet reconnaissance goldmine. graverobber parses the `rua=`/`ruf=` tags
-(handling comma-separated lists, mixed case, and `!size` limits), probes each
-report domain, and emits a `POTENTIAL` `dmarc` finding carrying the claimable
-domain in the `dmarc_uri` field. Both sub-cases are DNS-only signals with no
-fingerprint, classified like the SPF `include:` vector; they are distinguished
-by which of `dmarc_policy` / `dmarc_uri` is set.
+RFC 7489 §A.5 registers **two** report transports: `mailto:` (the host is the
+domain after the `@`) and `https:` (the host is the URL authority — the
+deployment model the large DMARC-as-a-service vendors offer via an HTTPS POST
+endpoint). If that report host is `NXDOMAIN` — the reporting vendor was
+decommissioned, or the address points at a forgotten internal subdomain whose
+zone was deleted — an attacker who registers or reclaims it **intercepts every
+DMARC report sent for the target**. The reports expose the target's full sending
+infrastructure, which spoofing attempts pass or fail alignment, and source IP
+reputation: a quiet reconnaissance goldmine. graverobber parses the `rua=`/`ruf=`
+tags (handling comma-separated lists, mixed case, `!size` limits, and **both**
+the `mailto:` and `https:` transports), probes each report host, and emits a
+`POTENTIAL` `dmarc` finding carrying the claimable host in the `dmarc_uri`
+field. Both sub-cases are DNS-only signals with no fingerprint, classified like
+the SPF `include:` vector; they are distinguished by which of `dmarc_policy` /
+`dmarc_uri` is set. This mirrors the dual-transport handling of the CAA `iodef=`
+and TLSRPT `rua=` report-host vectors.
 
 Together with SPF, DKIM, and MX, this completes the email-authentication
 takeover surface.
@@ -718,7 +723,7 @@ JSONL — one finding per line:
 ```json
 {"subdomain":"dev.example.com","vector":"cname","service":"AWS/S3","confidence":"CONFIRMED","cname":"example.s3.amazonaws.com","fingerprint":"The specified bucket does not exist","scheme":"https","timestamp":"2026-05-16T12:34:56Z"}
 {"subdomain":"s1._domainkey.example.com","vector":"dkim","confidence":"LIKELY","dkim_selector":"s1","dkim_key_bits":512,"evidence":"DKIM selector publishes a 512-bit RSA key (below the RFC 8301 1024-bit floor) — factorable, forgeable signatures","timestamp":"2026-05-28T12:00:00Z"}
-{"subdomain":"reports.deleted-vendor.net","vector":"dmarc","confidence":"POTENTIAL","dmarc_uri":"reports.deleted-vendor.net","evidence":"DMARC rua/ruf report domain is NXDOMAIN (claimable — report interception)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"reports.deleted-vendor.net","vector":"dmarc","confidence":"POTENTIAL","dmarc_uri":"reports.deleted-vendor.net","evidence":"DMARC rua/ruf report host is NXDOMAIN (claimable — report interception)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"dmarc","confidence":"POTENTIAL","dmarc_policy":"none","evidence":"DMARC policy is p=none with no rua= aggregate reporting (no enforcement and no visibility)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"spoofable.example.com","vector":"spf","confidence":"POTENTIAL","spf_all":"+all","evidence":"SPF policy ends in +all (Pass — authorises any host to send mail as the domain; domain is spoofable)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"axfr","service":"ns1.example.com","confidence":"CONFIRMED","nameservers":["ns1.example.com"],"leaked_hosts":["admin.example.com","vpn.example.com"],"evidence":"nameserver ns1.example.com allowed unauthenticated AXFR (412 records leaked; sample: admin.example.com, vpn.example.com)","timestamp":"2026-05-28T12:00:00Z"}
@@ -735,7 +740,7 @@ and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
 `include:`/`redirect=` domain or the permissive `+all` mechanism (`spf`), the
 failed nameservers (`ns`), the dangling
 mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation or
-weak inline RSA key size (`dkim`), the claimable `rua`/`ruf` report domain
+weak inline RSA key size (`dkim`), the claimable `rua`/`ruf` report host
 (`dmarc`), the leaking
 nameserver and leaked-host count (`axfr`), the orphaned `DS` key tags
 (`dnssec`), or the dangling TLSRPT report host (`tlsrpt`). ANSI colour is emitted only to a TTY;
@@ -803,7 +808,7 @@ subfinder -d example.com -silent | graverobber --csv -o takeovers.csv
 ```
 timestamp,subdomain,vector,confidence,service,target,scheme,fingerprint,evidence
 2026-05-28T12:00:00Z,dev.example.com,cname,CONFIRMED,AWS/S3,example.s3.amazonaws.com,https,The specified bucket does not exist,
-2026-05-28T12:00:00Z,reports.deleted-vendor.net,dmarc,POTENTIAL,,reports.deleted-vendor.net,,,DMARC rua/ruf report domain is NXDOMAIN
+2026-05-28T12:00:00Z,reports.deleted-vendor.net,dmarc,POTENTIAL,,reports.deleted-vendor.net,,,DMARC rua/ruf report host is NXDOMAIN
 2026-05-28T12:00:00Z,example.com,axfr,CONFIRMED,ns1.example.com,ns1.example.com,,,nameserver ns1.example.com allowed unauthenticated AXFR
 ```
 

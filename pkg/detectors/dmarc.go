@@ -3,6 +3,7 @@ package detectors
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 
 	"github.com/bugsyhewitt/graverobber/pkg/finding"
@@ -19,16 +20,22 @@ import (
 //	rua=mailto:aggregate@reports.example.net   (aggregate reports)
 //	ruf=mailto:forensic@reports.example.net    (failure/forensic reports)
 //
-// Dangling-report-domain sub-case. Each mailto URI names a domain that receives
-// mail on the policy owner's behalf. If that domain is NXDOMAIN (the reporting
-// vendor was decommissioned, or the address points at a forgotten internal
-// subdomain whose zone was deleted) an attacker who registers/claims it
-// intercepts every DMARC report sent for the target — a reconnaissance goldmine
-// exposing which spoofing attempts succeed, the target's full sending
-// infrastructure, and IP reputation. RFC 7489 §7.1 further allows the report
-// receiver's own published policy to be probed, so a dangling rua/ruf domain is
-// a live, low-noise takeover signal. The finding carries the claimable domain in
-// DMARCURI.
+// Dangling-report-host sub-case. RFC 7489 §6.2 defines each rua=/ruf= value as a
+// comma-separated list of DMARC URIs, and §A.5 names "mailto:" and "https:" as
+// the two registered transports. A mailto: URI names a domain that receives mail
+// on the policy owner's behalf; an https: URI names a collector host that accepts
+// the report over an HTTPS POST (the deployment model the large DMARC-as-a-service
+// vendors offer). If the report host is NXDOMAIN (the reporting vendor was
+// decommissioned, or the address points at a forgotten internal subdomain whose
+// zone was deleted) an attacker who registers/claims it intercepts every DMARC
+// report sent for the target — a reconnaissance goldmine exposing which spoofing
+// attempts succeed, the target's full sending infrastructure, and IP reputation.
+// RFC 7489 §7.1 further allows the report receiver's own published policy to be
+// probed, so a dangling rua/ruf host is a live, low-noise takeover signal. The
+// finding carries the claimable host in DMARCURI. Both transports are parsed: the
+// mailto: case takes the host after the "@", the https: case takes the URL
+// authority — the same dual-scheme handling the CAA iodef= (Rank 20) and TLSRPT
+// rua= (Rank 22) report-host vectors use.
 //
 // Weak-policy sub-case. A policy of p=none is monitor-only: it instructs
 // receivers to take NO action on a message that fails DMARC alignment, so
@@ -51,9 +58,10 @@ import (
 //  1. Resolve TXT records at _dmarc.<target>; extract the DMARC policy.
 //  2. Parse the p= tag; if it is "none" emit a Potential weak-policy finding.
 //  3. Parse the rua= and ruf= tags; split comma-separated URIs.
-//  4. For each mailto: URI, extract the domain to the right of the "@".
-//  5. Probe the domain with CNAMEChain; ErrNXDomain means it is claimable —
-//     emit a Potential dangling-report-domain finding (DNS-only signal, no
+//  4. For each mailto: URI, extract the domain to the right of the "@"; for each
+//     https:/http: URI, extract the URL authority host.
+//  5. Probe the host with CNAMEChain; ErrNXDomain means it is claimable —
+//     emit a Potential dangling-report-host finding (DNS-only signal, no
 //     fingerprint match, consistent with the SPF vector's classification).
 func DMARC(ctx context.Context, target string, r *resolver.Resolver) ([]finding.Finding, error) {
 	txts, err := r.TXT(ctx, "_dmarc."+target)
@@ -71,7 +79,7 @@ func DMARC(ctx context.Context, target string, r *resolver.Resolver) ([]finding.
 	// Weak-policy sub-case: p=none is monitor-only (no enforcement). It is keyed
 	// on the target itself, not a report domain, so it is emitted once per record.
 	if policy := dmarcPolicy(record); policy == "none" {
-		hasReporting := len(dmarcReportDomains(record)) > 0
+		hasReporting := len(dmarcReportHosts(record)) > 0
 		evidence := "DMARC policy is p=none (monitor-only — spoofed mail is delivered)"
 		if !hasReporting {
 			evidence = "DMARC policy is p=none with no rua= aggregate reporting (no enforcement and no visibility)"
@@ -85,25 +93,25 @@ func DMARC(ctx context.Context, target string, r *resolver.Resolver) ([]finding.
 		})
 	}
 
-	domains := dmarcReportDomains(record)
-	seen := map[string]bool{} // deduplicate report domains within a single target
-	for _, domain := range domains {
-		if domain == "" || domain == target || seen[domain] {
+	hosts := dmarcReportHosts(record)
+	seen := map[string]bool{} // deduplicate report hosts within a single target
+	for _, host := range hosts {
+		if host == "" || host == target || seen[host] {
 			continue
 		}
-		seen[domain] = true
+		seen[host] = true
 
 		// CNAMEChain (TypeA) is the authoritative NXDOMAIN probe: TXT returning
 		// (nil, nil) is ambiguous, whereas ErrNXDomain is definitive — mirrors
 		// the SPF include: detector exactly.
-		_, chainErr := r.CNAMEChain(ctx, domain)
+		_, chainErr := r.CNAMEChain(ctx, host)
 		if errors.Is(chainErr, resolver.ErrNXDomain) {
 			findings = append(findings, finding.Finding{
-				Subdomain:  domain,
+				Subdomain:  host,
 				Vector:     finding.VectorDMARC,
 				Confidence: finding.Potential,
-				DMARCURI:   domain,
-				Evidence:   "DMARC rua/ruf report domain is NXDOMAIN (claimable — report interception)",
+				DMARCURI:   host,
+				Evidence:   "DMARC rua/ruf report host is NXDOMAIN (claimable — report interception)",
 			})
 		}
 	}
@@ -139,12 +147,14 @@ func extractDMARC(txts []string) string {
 	return ""
 }
 
-// dmarcReportDomains extracts the set of report-receiving domains from the rua=
-// and ruf= tags of a DMARC policy record. Each tag is a comma-separated list of
-// DMARC URIs; the only scheme DMARC defines is "mailto:". An optional size limit
-// may follow the address ("mailto:r@x.net!10m") and is stripped. The returned
-// domains are lower-cased.
-func dmarcReportDomains(record string) []string {
+// dmarcReportHosts extracts the set of report-receiving hosts from the rua= and
+// ruf= tags of a DMARC policy record. Each tag is a comma-separated list of DMARC
+// URIs (RFC 7489 §6.2); §A.5 registers two transports — "mailto:" (the host is the
+// domain after the "@") and "https:" (the host is the URL authority). An optional
+// "!<size>" report-size limit may follow a mailto: address and is stripped. Any
+// other scheme, or a URI with no host, is skipped — graverobber never probes a
+// host it cannot positively identify. The returned hosts are lower-cased.
+func dmarcReportHosts(record string) []string {
 	var out []string
 	for _, tag := range strings.Split(record, ";") {
 		tag = strings.TrimSpace(tag)
@@ -153,26 +163,47 @@ func dmarcReportDomains(record string) []string {
 			continue
 		}
 		for _, uri := range strings.Split(val, ",") {
-			uri = strings.TrimSpace(uri)
-			addr, ok := strings.CutPrefix(strings.ToLower(uri), "mailto:")
-			if !ok {
-				continue
-			}
-			// Strip an optional "!<size>" report-size limit (RFC 7489 §6.2).
-			if i := strings.IndexByte(addr, '!'); i >= 0 {
-				addr = addr[:i]
-			}
-			at := strings.LastIndexByte(addr, '@')
-			if at < 0 || at == len(addr)-1 {
-				continue
-			}
-			domain := strings.TrimSpace(addr[at+1:])
-			if domain != "" {
-				out = append(out, domain)
+			if host := dmarcURIHost(strings.TrimSpace(uri)); host != "" {
+				out = append(out, host)
 			}
 		}
 	}
 	return out
+}
+
+// dmarcURIHost extracts the report-receiving host from a single DMARC URI and
+// lower-cases it. RFC 7489 §A.5 registers "mailto:" and "https:" as the report
+// transports: for mailto: the host is the domain after the "@" (with an optional
+// trailing "!<size>" limit stripped per §6.2); for http/https the host is the URL
+// authority. Any other scheme, or a URI with no host, returns "" so it is skipped.
+// This mirrors the CAA iodef= (caaIodefHost) and BIMI (bimiURLHost) parsers in the
+// same package, reusing the package-local cutPrefixFold for the case-insensitive
+// scheme match (URI schemes are case-insensitive, RFC 3986 §3.1).
+func dmarcURIHost(uri string) string {
+	if uri == "" {
+		return ""
+	}
+
+	if addr, ok := cutPrefixFold(uri, "mailto:"); ok {
+		// Strip an optional "!<size>" report-size limit (RFC 7489 §6.2).
+		if i := strings.IndexByte(addr, '!'); i >= 0 {
+			addr = addr[:i]
+		}
+		at := strings.LastIndexByte(addr, '@')
+		if at < 0 || at == len(addr)-1 {
+			return ""
+		}
+		return strings.ToLower(strings.TrimSpace(addr[at+1:]))
+	}
+
+	u, err := url.Parse(uri)
+	if err != nil {
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // cutDMARCTag returns the value of a rua= or ruf= tag, or ("", false) when the

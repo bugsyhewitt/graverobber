@@ -42,10 +42,12 @@ const (
 	// inline key.
 	VectorDKIM Vector = "dkim"
 	// VectorDMARC: a DMARC policy at _dmarc.<domain> is either weak or dangling.
-	// In the dangling sub-case a rua=/ruf= report URI points at an NXDOMAIN
-	// domain — an attacker who claims it intercepts every DMARC aggregate/
-	// forensic report sent for the target (DMARCURI carries the claimable
-	// domain). In the weak-policy sub-case the published policy is p=none
+	// In the dangling sub-case a rua=/ruf= report URI points at an NXDOMAIN host —
+	// either a mailto: address domain or an https: collector host (the two report
+	// transports RFC 7489 §A.5 registers) — and an attacker who claims it
+	// intercepts every DMARC aggregate/forensic report sent for the target
+	// (DMARCURI carries the claimable host). In the weak-policy sub-case the
+	// published policy is p=none
 	// (monitor-only: receivers take no action on a failed check, so spoofed mail
 	// is delivered unimpeded) — the DMARCPolicy field carries the policy token
 	// and DMARCURI is empty. The two sub-cases are distinguished by which of
@@ -220,8 +222,9 @@ type Finding struct {
 	// the RFC 8301 1024-bit floor. It is zero (omitted) for the dangling-CNAME
 	// sub-case, which is identified instead by the CNAME field.
 	DKIMKeyBits int `json:"dkim_key_bits,omitempty"`
-	// DMARCURI is set for the dangling-report-domain VectorDMARC sub-case: the
-	// claimable rua/ruf report domain (the part after "mailto:...@").
+	// DMARCURI is set for the dangling-report-host VectorDMARC sub-case: the
+	// claimable rua/ruf report host — a mailto: address domain (the part after
+	// "mailto:...@") or an https: collector host (the URL authority).
 	DMARCURI string `json:"dmarc_uri,omitempty"`
 	// DMARCPolicy is set for the weak-policy VectorDMARC sub-case: the policy
 	// token from the p= tag when it is "none" (monitor-only, no enforcement).

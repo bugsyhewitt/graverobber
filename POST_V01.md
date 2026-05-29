@@ -1065,6 +1065,76 @@ dependency.
 
 ---
 
+## Rank 23 — DMARC `https:` report-URI dangling-host detection — ✅ IMPLEMENTED (Phase 2, Rotation 29)
+
+**Status:** Shipped. Rotation 29's directive named two candidates — a **BIMI
+dangling authority-domain** check or a **DMARC report-uri dangling** check — as the
+next DNS-security vector, with instructions to verify which (if either) was already
+shipped and, if both were, to pick the next best unshipped gap. Assessment found
+**both directed candidates already shipped** in their named form:
+
+- **BIMI dangling authority-domain is already shipped.** `detectors.BIMI` (Rank 18,
+  the 11th vector) already parses the `a=` tag — the VMC (Verified Mark
+  Certificate) **authority** URL — alongside the `l=` logo URL, extracts its host
+  via `bimiURLHost`, and emits a `POTENTIAL bimi` finding when that host is
+  NXDOMAIN. The `a=` (authority) asset host is the BIMI authority-domain; it is
+  already covered end to end. Re-implementing it would duplicate existing coverage.
+- **DMARC report-URI dangling is already shipped — for the `mailto:` transport.**
+  `detectors.DMARC` (Rank 8) already parses every `rua=`/`ruf=` `mailto:` URI,
+  extracts the domain after the `@`, and emits a `POTENTIAL dmarc` finding when it
+  is NXDOMAIN.
+
+Per the directive, the next best unshipped gap **inside the named DMARC report-URI
+candidate** was implemented: the DMARC report-URI parser handled only the
+`mailto:` transport and **silently dropped every `https:` report URI**. RFC 7489
+§6.2 defines each `rua=`/`ruf=` value as a comma-separated list of DMARC URIs, and
+§A.5 registers **two** transports — `mailto:` and `https:` (an HTTPS POST endpoint,
+the deployment model the large DMARC-as-a-service vendors offer). If an `https:`
+collector host is decommissioned but the record is left behind, an attacker who
+reclaims it **receives every DMARC aggregate/forensic report sent for the target** —
+the identical report-interception takeover the `mailto:` sub-case covers, on a
+transport the detector previously ignored. This closes DMARC report-URI coverage
+end to end (`mailto:` + `https:`).
+
+Implemented as an **extension of the existing `dmarc` vector**, not a new vector:
+no new vector constant, no new finding field (reuses `DMARCURI` for the claimable
+host), no new CLI flag (covered by the existing `--no-dmarc` opt-out). The
+`mailto:`-only `dmarcReportDomains` parser was generalised to `dmarcReportHosts`,
+which delegates each URI to a new `dmarcURIHost` helper — a `mailto:`
+host-after-`@` parser (with the RFC 7489 §6.2 `!<size>` limit stripped) plus a
+`net/url` `http(s)://` authority parser, reusing the package-local `cutPrefixFold`
+for the case-insensitive scheme match. This mirrors the CAA `iodef=` (`caaIodefHost`,
+Rank 20) and BIMI (`bimiURLHost`, Rank 18) parsers exactly. Any other scheme, or a
+URI with no host, is skipped — the detector never probes a host it cannot positively
+identify. The evidence string and SARIF/CLI/README wording moved from "report
+domain" to "report host" to reflect both transports.
+
+Guarded by new/updated tests in `pkg/detectors/detectors_test.go` (driven by the
+existing local-UDP `dmarcDNSServer` harness — integration-first, real DNS
+round-trips): a `dmarcURIHost` unit table (mailto/https/http, size-limit, case-fold,
+port-strip, no-@, empty-domain, unsupported-scheme, no-authority, bare-host),
+an expanded `dmarcReportHosts` table (https host, mixed-transport, upper-case-host,
+ftp-skipped), a full-detector dangling-`https:`-host case, a live-`https:`-host
+no-finding case, and a mixed-transport-only-dangling-flagged case. Full suite green
+(`-race`), `go vet` clean. README DMARC section (heading, sub-case prose, vector
+table, flag doc, JSONL + CSV examples, terminal-detail list), the SARIF rule
+descriptor, the CLI `Long`/flag help, and the `VectorDMARC`/`DMARCURI` doc comments
+updated to the two transports.
+
+**Why this over re-implementing a directed candidate:** both directed candidates
+were already shipped (verified in-code), and the directive instructs picking the
+next best unshipped gap in that case. The `https:` report transport is a genuinely
+new, exploitable-by-omission, DNS-only signal on a record the detector already
+parses but previously ignored — closing DMARC report-URI coverage with zero new API
+surface, mirroring the Rank 20 (`iodef` http(s)) and Rank 22 (TLSRPT https) report-
+host dispositions exactly.
+
+**Complexity:** Low — one parser generalisation + one helper, no new vector/field/
+flag, new tests + expanded tables, README + SARIF + help + doc-comment updates. No
+new dependency (`net/url` is stdlib; the resolver already returns the TXT record).
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -1107,3 +1177,4 @@ dependency.
 | 20 | CAA `iodef` dangling-report-host detection ✅ | Low | High (completes CAA coverage, report interception) | No (3rd sub-case of `caa`, reuses field + flag) |
 | 21 | SPF `a:`/`mx:` mechanism dangling detection ✅ | Low | High (completes SPF reference coverage, same SubdoMailing takeover) | No (extends `spf`, reuses field + flag) |
 | 22 | TLSRPT dangling-report-destination detection (13th vector) ✅ | Low-Med | High (new SMTP-TLS reporting surface, report interception + downgrade-masking) | Yes (new vector + field + flag) |
+| 23 | DMARC `https:` report-URI dangling-host detection ✅ | Low | High (completes DMARC report-URI coverage, same report interception) | No (extends `dmarc`, reuses field + flag) |

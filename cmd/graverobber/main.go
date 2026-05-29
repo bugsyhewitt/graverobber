@@ -105,7 +105,7 @@ func newRootCmd() *cobra.Command {
 		Short: "Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, DMARC, AXFR, CAA, TLSA, MTA-STS, BIMI, DNSSEC, and TLSRPT dangling/misconfigured records",
 		Long: "graverobber digs up the subdomains your target left for dead.\n" +
 			"It detects CNAME fingerprint, NS zone-deletion, SPF include, MX\n" +
-			"dangling-record, DKIM selector, DMARC report-domain takeover, AXFR\n" +
+			"dangling-record, DKIM selector, DMARC report-host takeover, AXFR\n" +
 			"zone-transfer misconfiguration, CAA misconfiguration, TLSA dangling\n" +
 			"DANE pin, MTA-STS dangling-policy-host takeover, BIMI dangling-asset\n" +
 			"host, DNSSEC orphaned-DS (broken chain-of-trust) outages, and TLSRPT\n" +
@@ -138,7 +138,7 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVar(&f.noSPF, "no-spf", false, "skip SPF include checks")
 	fl.BoolVar(&f.noMX, "no-mx", false, "skip MX dangling-record checks")
 	fl.BoolVar(&f.noDKIM, "no-dkim", false, "skip DKIM selector dangling-CNAME checks")
-	fl.BoolVar(&f.noDMARC, "no-dmarc", false, "skip DMARC report-domain dangling checks")
+	fl.BoolVar(&f.noDMARC, "no-dmarc", false, "skip DMARC report-host dangling + p=none checks")
 	fl.BoolVar(&f.noAXFR, "no-axfr", false, "skip AXFR zone-transfer misconfiguration checks")
 	fl.BoolVar(&f.noCAA, "no-caa", false, "skip CAA (Certification Authority Authorization) misconfiguration checks")
 	fl.BoolVar(&f.noTLSA, "no-tlsa", false, "skip TLSA dangling-DANE-pin checks")
