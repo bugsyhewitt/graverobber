@@ -137,6 +137,13 @@ func csvTarget(f finding.Finding) string {
 		// The permissive sub-case has no remote target; the misconfigured
 		// domain itself (the subdomain column) is the actionable item.
 		return "* (any CA)"
+	case finding.VectorTLSA:
+		// The dangling DANE pin's owner name plus the gone mail host it covers
+		// are the actionable target.
+		if len(f.MXHosts) > 0 {
+			return fmt.Sprintf("%s -> %s (NXDOMAIN)", f.TLSAName, f.MXHosts[0])
+		}
+		return f.TLSAName
 	default:
 		return ""
 	}

@@ -156,6 +156,11 @@ var vectorRuleText = map[finding.Vector]struct {
 		"A CAA record names a claimable CA domain or authorises any CA.",
 		"A CAA (Certification Authority Authorization, RFC 8659) record set is misconfigured: an issue/issuewild tag either names a CA domain that is NXDOMAIN (an attacker who registers it can stand up a CA the policy authorises to issue certificates for the domain) or uses the wildcard \"*\" value that authorises any CA to issue — re-opening the man-in-the-middle TLS exposure CAA exists to close.",
 	},
+	finding.VectorTLSA: {
+		"Dangling DANE TLSA pin",
+		"A DANE TLSA record pins a mail host that is NXDOMAIN.",
+		"A DANE TLSA record (RFC 6698 / RFC 7672) at _25._tcp.<mxhost> pins the TLS certificate of a mail exchanger that is NXDOMAIN. Because DANE for SMTP mandates DNSSEC the stale pin is authenticated: it hard-fails inbound mail from every DANE-validating sender, and an attacker who reclaims the gone mail host can present a certificate matching the published association to be trusted by DANE senders — a DANE-blessed mail-interception path.",
+	},
 }
 
 // ruleForVector builds the SARIF rule descriptor for a vector. Unknown vectors
@@ -271,6 +276,12 @@ func sarifMessage(f finding.Finding) string {
 			detail = "CAA issuer " + f.CAAIssuer + " is NXDOMAIN (claimable)"
 		} else {
 			detail = "CAA authorises any CA (permissive)"
+		}
+	case finding.VectorTLSA:
+		if len(f.MXHosts) > 0 {
+			detail = fmt.Sprintf("DANE TLSA %s pins %s which is NXDOMAIN (dangling pin)", f.TLSAName, f.MXHosts[0])
+		} else {
+			detail = "DANE TLSA " + f.TLSAName + " dangling pin"
 		}
 	}
 	msg := fmt.Sprintf("[%s] %s takeover candidate on %s", f.Confidence, f.Vector, f.Subdomain)

@@ -183,7 +183,7 @@ func TestScanSummary_BreakdownOrderIsStable(t *testing.T) {
 var allEmittableVectors = []finding.Vector{
 	finding.VectorCNAME, finding.VectorNS, finding.VectorSPF,
 	finding.VectorMX, finding.VectorDKIM, finding.VectorDMARC,
-	finding.VectorAXFR, finding.VectorCAA,
+	finding.VectorAXFR, finding.VectorCAA, finding.VectorTLSA,
 }
 
 // TestScanSummary_CountsEveryVector verifies the by-vector breakdown surfaces

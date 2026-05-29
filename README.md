@@ -1,14 +1,14 @@
 # graverobber
 
-**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer and CAA misconfiguration.**
+**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer, CAA misconfiguration, and dangling DANE TLSA pins.**
 
 > Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, DKIM,
-> and DMARC takeover detection plus unauthenticated AXFR zone-transfer discovery
-> and CAA misconfiguration in one pipeline-friendly Go binary.
+> and DMARC takeover detection plus unauthenticated AXFR zone-transfer discovery,
+> CAA misconfiguration, and dangling DANE TLSA pins in one pipeline-friendly Go binary.
 
 `graverobber` is the only maintained Go binary that covers **CNAME**, **NS**,
 **SPF**, **MX**, **DKIM**, and **DMARC** takeover vectors plus **AXFR**
-zone-transfer and **CAA** misconfiguration in a single tool. It is a static binary with no
+zone-transfer, **CAA** misconfiguration, and dangling **DANE TLSA** pins in a single tool. It is a static binary with no
 runtime, reads targets from stdin/file/flag, streams JSONL, and uses the
 exit-code conventions of the `httpx`/`subfinder` family so it drops straight into
 a recon pipeline.
@@ -27,6 +27,7 @@ a recon pipeline.
 | DMARC | A `_dmarc` policy is monitor-only (`p=none`, spoofable) **or** its `rua=`/`ruf=` report domain is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon; `p=none` spoofing (BEC/phishing precondition) |
 | AXFR  | A delegated nameserver allows an unauthenticated zone transfer, leaking every record | Classic DNS misconfiguration; force-multiplier for every other vector |
 | CAA   | A `CAA` record names a CA domain that is NXDOMAIN and re-claimable, **or** uses the `*` wildcard authorising any CA to issue | Missing/weak certificate-issuance control → man-in-the-middle TLS |
+| TLSA  | A DANE `TLSA` pin at `_25._tcp.<mxhost>` covers an MX host that is NXDOMAIN — a dangling, DNSSEC-authenticated pin | Hard-fails inbound mail from DANE senders; reclaimable mail host → DANE-trusted interception (RFC 7672) |
 
 Most scanners cover CNAME only. NS, SPF, MX, DKIM, and DMARC takeover are live,
 actively-exploited vectors that almost no Go tool handles. Together SPF, DKIM,
@@ -35,6 +36,10 @@ the classic zone-transfer leak: a single misconfigured nameserver hands an
 attacker the full subdomain list to feed back through every other vector. CAA
 adds the certificate-issuance control: a domain that names a claimable CA — or
 explicitly authorises any CA — re-opens the door to fraudulent TLS certificates.
+TLSA closes the loop on the mail surface: a DANE pin left behind for a deleted
+mail host silently black-holes inbound mail and — because DANE for SMTP mandates
+DNSSEC — hands an attacker who reclaims that host a DANE-trusted mail-interception
+path.
 
 ---
 
@@ -78,7 +83,7 @@ graverobber -l subs.txt --fingerprints ~/private.json
 graverobber -l subs.txt --offline
 
 # Skip vectors
-graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa
+graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa
 
 # Probe a custom set of DKIM selectors instead of the built-in ESP defaults
 graverobber -l subs.txt --selectors default,google,s1,s2,k1
@@ -230,6 +235,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-dmarc` | false | Skip DMARC report-domain dangling checks |
 | `--no-axfr` | false | Skip AXFR zone-transfer misconfiguration checks |
 | `--no-caa` | false | Skip CAA (Certification Authority Authorization) misconfiguration checks |
+| `--no-tlsa` | false | Skip TLSA dangling-DANE-pin checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
 | `--offline` | false | Cached/embedded fingerprints only, no network |
@@ -454,6 +460,40 @@ and is intentionally **not** flagged, to keep the vector low-noise and
 pipeline-friendly — only a present-but-broken policy is reported. The secure
 deny-all `;` value is likewise never flagged.
 
+### Dangling DANE TLSA pin (`--no-tlsa`)
+
+DANE for SMTP (RFC 7672) lets a domain pin its mail server's TLS certificate in
+DNS — secured by DNSSEC — so a sending MTA can verify the certificate without
+relying on the public CA system. The pin lives at `_25._tcp.<mxhost>` as a
+`TLSA` record (RFC 6698):
+
+```
+_25._tcp.mx.example.com.  TLSA  3 1 1 <sha-256 of the server's public key>
+```
+
+The pin is only as healthy as the mail host it covers. When the MX host is
+removed — the mail vendor is decommissioned, the hosted zone is deleted, the
+subdomain is retired — but the `TLSA` record is left behind, you get a **dangling
+DANE pin**, and two things go wrong:
+
+- **Inbound mail black-holes.** RFC 7672 §2.2 makes a published-but-unmatchable
+  pin a permanent TLS failure, so every DANE-validating sender silently stops
+  delivering mail to the domain.
+- **DANE-trusted interception becomes possible.** Because DANE mandates DNSSEC,
+  the stale pin is *authenticated*. An attacker who reclaims the gone mail host
+  (re-registers the domain, or re-creates the deleted hosted zone) can stand up an
+  SMTP server presenting a certificate that matches the still-published `TLSA`
+  association — and be trusted by every DANE sender.
+
+graverobber resolves the target's `MX` records, probes `_25._tcp.<mxhost>` for a
+`TLSA` pin, and — if a pin exists — checks whether that mail host is NXDOMAIN. A
+dangling pin is reported as a `POTENTIAL` `tlsa` finding carrying the DANE owner
+name in `tlsa_name` and the dangling mail host in `mx_hosts`. A domain with no
+`TLSA` records, or whose pinned hosts all resolve, is the healthy case and is
+intentionally **not** flagged — only a present-but-orphaned pin is reported,
+keeping the vector low-noise. (A dangling MX host with *no* DANE pin is reported
+by the MX vector instead, not here.)
+
 ---
 
 ## Confidence model
@@ -479,6 +519,7 @@ JSONL — one finding per line:
 {"subdomain":"example.com","vector":"dmarc","confidence":"POTENTIAL","dmarc_policy":"none","evidence":"DMARC policy is p=none with no rua= aggregate reporting (no enforcement and no visibility)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"spoofable.example.com","vector":"spf","confidence":"POTENTIAL","spf_all":"+all","evidence":"SPF policy ends in +all (Pass — authorises any host to send mail as the domain; domain is spoofable)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"axfr","service":"ns1.example.com","confidence":"CONFIRMED","nameservers":["ns1.example.com"],"leaked_hosts":["admin.example.com","vpn.example.com"],"evidence":"nameserver ns1.example.com allowed unauthenticated AXFR (412 records leaked; sample: admin.example.com, vpn.example.com)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"example.com","vector":"tlsa","confidence":"POTENTIAL","mx_hosts":["mx.deleted-vendor.invalid"],"tlsa_name":"_25._tcp.mx.deleted-vendor.invalid","evidence":"DANE TLSA pin published at _25._tcp.mx.deleted-vendor.invalid but MX host mx.deleted-vendor.invalid is NXDOMAIN (dangling DANE pin — hard-fails inbound mail; reclaimable for DANE-trusted interception)","timestamp":"2026-05-28T12:00:00Z"}
 ```
 
 Without `--json`, findings render as one coloured human-readable line per
@@ -495,7 +536,7 @@ piped or file output is plain text.
 When the scan finishes, the human-readable mode closes with a triage summary on
 stderr: the total count, then a breakdown by confidence tier (strongest first)
 and by vector (pipeline order). The by-vector breakdown covers every vector the
-scanner can emit (`cname`, `ns`, `spf`, `mx`, `dkim`, `dmarc`, `axfr`, `caa`), so
+scanner can emit (`cname`, `ns`, `spf`, `mx`, `dkim`, `dmarc`, `axfr`, `caa`, `tlsa`), so
 the per-vector counts always reconcile with the total. Only the tiers and vectors
 that actually occurred are listed, so a single-vector scan stays uncluttered:
 
