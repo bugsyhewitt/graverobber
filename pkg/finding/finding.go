@@ -33,6 +33,10 @@ const (
 	// URI whose domain is NXDOMAIN — an attacker who claims it intercepts every
 	// DMARC aggregate/forensic report sent for the target.
 	VectorDMARC Vector = "dmarc"
+	// VectorAXFR: a delegated nameserver allows an unauthenticated DNS zone
+	// transfer (AXFR), leaking every record in the zone to any client. It is a
+	// direct information disclosure and a force-multiplier for the other vectors.
+	VectorAXFR Vector = "axfr"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.
@@ -120,6 +124,11 @@ type Finding struct {
 	// DMARCURI is set for VectorDMARC findings: the claimable rua/ruf report
 	// domain (the part after "mailto:...@").
 	DMARCURI string `json:"dmarc_uri,omitempty"`
+	// LeakedHosts is set for VectorAXFR findings: a deduplicated, sorted sample
+	// of the owner names exposed by the zone transfer (capped; the full zone is
+	// not serialised). For VectorAXFR, the leaking nameserver is in Service and
+	// also the sole entry in Nameservers.
+	LeakedHosts []string `json:"leaked_hosts,omitempty"`
 
 	// Scheme records which scheme produced an HTTP-based match: "https" or
 	// "http" (see handoff open question #4).

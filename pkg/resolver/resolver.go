@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -208,6 +209,147 @@ func (r *Resolver) NS(ctx context.Context, host string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// ErrAXFRRefused signals that a nameserver declined a zone-transfer (AXFR)
+// request — the correct, secure behaviour. ZoneTransfer returns it (wrapped)
+// for a REFUSED/NOTAUTH rcode or a connection that yields no zone data, so the
+// detector can distinguish "secure" from a transient transport error.
+var ErrAXFRRefused = errors.New("resolver: AXFR refused")
+
+// maxAXFRRecords caps the number of resource records collected from a single
+// zone transfer. A successful AXFR against a large zone can stream tens of
+// thousands of records; the detector only needs to confirm the leak and sample
+// the surface, so the records are bounded to keep memory predictable in a
+// 50-worker scan. The cap does not affect the vulnerable/secure verdict, which
+// is decided by whether ANY records were transferred.
+const maxAXFRRecords = 5000
+
+// ZoneTransferResult reports the outcome of a ZoneTransfer attempt: the total
+// number of non-SOA records the nameserver streamed and a deduplicated, sorted
+// sample of the owner names (hostnames) those records exposed. The detector
+// uses RecordCount for the verdict (>0 means leak) and Hosts for evidence.
+type ZoneTransferResult struct {
+	// RecordCount is the number of non-SOA resource records transferred (capped
+	// at maxAXFRRecords). Zero means the nameserver refused or returned only the
+	// bracketing SOAs.
+	RecordCount int
+	// Hosts is a deduplicated, sorted sample of the distinct owner names seen in
+	// the transfer, capped at maxAXFRHostsSampled. It proves the leak and gives
+	// the operator a representative view without serialising the whole zone.
+	Hosts []string
+}
+
+// maxAXFRHostsSampled caps the distinct owner names retained in a
+// ZoneTransferResult. The verdict only needs one record; the sample is for the
+// operator.
+const maxAXFRHostsSampled = 25
+
+// axfrPort is the TCP port ZoneTransfer dials when a nameserver is given without
+// an explicit port. It is the standard DNS port in production; it is a var (not
+// a const) solely so tests can point the AXFR dial at an ephemeral test server
+// without binding privileged port 53 — the same testability pattern used by
+// soaBackoff. Production code never reassigns it.
+var axfrPort = "53"
+
+// SetAXFRPortForTest overrides the default AXFR TCP port and returns a restore
+// function. It exists so cross-package tests (e.g. the detectors package) can
+// dial an unprivileged ephemeral AXFR server. It MUST only be called from tests;
+// production code never imports it. The returned func restores the prior value.
+func SetAXFRPortForTest(port string) (restore func()) {
+	prev := axfrPort
+	axfrPort = port
+	return func() { axfrPort = prev }
+}
+
+// ZoneTransfer attempts an unauthenticated AXFR of zone against nameserver. A
+// nameserver that allows AXFR to an arbitrary client is misconfigured: it leaks
+// every record in the zone (all subdomains, internal hostnames, infrastructure
+// layout) to anyone who asks.
+//
+// On success it returns a ZoneTransferResult whose RecordCount is > 0 (SOA
+// records excluded, since an AXFR brackets the zone with two SOAs). A nameserver
+// that correctly refuses returns (zero-value result, ErrAXFRRefused). A
+// transport-level failure returns (zero-value result, <that error>); callers
+// treat a non-nil, non-ErrAXFRRefused error as "indeterminate" and emit no
+// finding.
+//
+// AXFR is TCP-only by protocol. The transfer uses the resolver's timeout for
+// dial, read, and write so a hung nameserver cannot stall a worker.
+func (r *Resolver) ZoneTransfer(ctx context.Context, zone, nameserver string) (ZoneTransferResult, error) {
+	if _, _, err := net.SplitHostPort(nameserver); err != nil {
+		nameserver = net.JoinHostPort(nameserver, axfrPort)
+	}
+
+	msg := new(dns.Msg)
+	msg.SetAxfr(dns.Fqdn(zone))
+
+	tr := &dns.Transfer{
+		DialTimeout:  r.timeout,
+		ReadTimeout:  r.timeout,
+		WriteTimeout: r.timeout,
+	}
+
+	envCh, err := tr.In(msg, nameserver)
+	if err != nil {
+		// Dial/write failure (connection refused, timeout) — indeterminate, not
+		// a security verdict.
+		return ZoneTransferResult{}, err
+	}
+
+	count := 0
+	hostSet := make(map[string]struct{})
+	for {
+		select {
+		case <-ctx.Done():
+			return ZoneTransferResult{}, ctx.Err()
+		case env, ok := <-envCh:
+			if !ok {
+				// Channel drained cleanly. If the nameserver streamed no records
+				// it effectively refused the transfer.
+				if count == 0 {
+					return ZoneTransferResult{}, ErrAXFRRefused
+				}
+				return makeZoneTransferResult(count, hostSet), nil
+			}
+			if env.Error != nil {
+				// A REFUSED/NOTAUTH rcode (the secure response) surfaces here as
+				// an error after zero records — report it as a clean refusal. A
+				// mid-stream error after records were already collected still
+				// counts as a leak (the zone data is already out).
+				if count > 0 {
+					return makeZoneTransferResult(count, hostSet), nil
+				}
+				return ZoneTransferResult{}, fmt.Errorf("%w: %v", ErrAXFRRefused, env.Error)
+			}
+			for _, rr := range env.RR {
+				// Exclude the bracketing SOA records: an AXFR begins and ends
+				// with the zone SOA, so a refused-but-SOA-only response is not a
+				// real leak.
+				if _, isSOA := rr.(*dns.SOA); isSOA {
+					continue
+				}
+				count++
+				if len(hostSet) < maxAXFRHostsSampled {
+					hostSet[strings.TrimSuffix(rr.Header().Name, ".")] = struct{}{}
+				}
+				if count >= maxAXFRRecords {
+					return makeZoneTransferResult(count, hostSet), nil
+				}
+			}
+		}
+	}
+}
+
+// makeZoneTransferResult finalises a result: it sorts the sampled host set for
+// stable, deterministic evidence output.
+func makeZoneTransferResult(count int, hostSet map[string]struct{}) ZoneTransferResult {
+	hosts := make([]string, 0, len(hostSet))
+	for h := range hostSet {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	return ZoneTransferResult{RecordCount: count, Hosts: hosts}
 }
 
 // MX returns the mail-exchanger hostnames for host (the right-hand side of each

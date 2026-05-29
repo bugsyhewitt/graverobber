@@ -486,3 +486,164 @@ func TestAuthoritativeSOA_TCPFallbackOnUDPTimeout(t *testing.T) {
 		t.Errorf("expected ErrZoneDeleted via TCP fallback after UDP timeout, got: %v", err)
 	}
 }
+
+// ---- ZoneTransfer (AXFR) ----------------------------------------------------
+
+// startAXFRServer spins up a TCP DNS server on 127.0.0.1 that answers AXFR for
+// `zone` by streaming the supplied records (bracketed with SOA envelopes, as a
+// real master does). It returns the server address and a cleanup function. A
+// nil records slice models a permissive server that nonetheless has an empty
+// zone (only the SOAs); a server that should REFUSE is modelled separately.
+func startAXFRServer(t *testing.T, zone string, records []dns.RR) (addr string, cleanup func()) {
+	t.Helper()
+	pc, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	soa := &dns.SOA{
+		Hdr:     dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 300},
+		Ns:      "ns1." + dns.Fqdn(zone),
+		Mbox:    "hostmaster." + dns.Fqdn(zone),
+		Serial:  1,
+		Refresh: 3600, Retry: 600, Expire: 86400, Minttl: 300,
+	}
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		if len(req.Question) == 0 || req.Question[0].Qtype != dns.TypeAXFR {
+			m := new(dns.Msg)
+			m.SetRcode(req, dns.RcodeRefused)
+			_ = w.WriteMsg(m)
+			return
+		}
+		tr := new(dns.Transfer)
+		ch := make(chan *dns.Envelope)
+		go func() {
+			rrs := []dns.RR{soa}
+			rrs = append(rrs, records...)
+			rrs = append(rrs, soa) // closing SOA brackets the zone
+			ch <- &dns.Envelope{RR: rrs}
+			close(ch)
+		}()
+		_ = tr.Out(w, req, ch)
+	})
+	srv := &dns.Server{Listener: pc, Handler: handler}
+	go func() { _ = srv.ActivateAndServe() }()
+	return pc.Addr().String(), func() { _ = srv.Shutdown() }
+}
+
+// startRefusingAXFRServer spins up a TCP DNS server that REFUSES every AXFR — the
+// secure, correctly-configured behaviour.
+func startRefusingAXFRServer(t *testing.T) (addr string, cleanup func()) {
+	t.Helper()
+	pc, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(req, dns.RcodeRefused)
+		_ = w.WriteMsg(m)
+	})
+	srv := &dns.Server{Listener: pc, Handler: handler}
+	go func() { _ = srv.ActivateAndServe() }()
+	return pc.Addr().String(), func() { _ = srv.Shutdown() }
+}
+
+// TestZoneTransfer_LeakReturnsRecords verifies that a permissive nameserver
+// streaming zone data yields a result whose RecordCount excludes the bracketing
+// SOAs and whose Hosts sample is deduplicated and sorted.
+func TestZoneTransfer_LeakReturnsRecords(t *testing.T) {
+	const zone = "leaky.example.com"
+	records := []dns.RR{
+		&dns.A{Hdr: dns.RR_Header{Name: dns.Fqdn("www." + zone), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("10.0.0.1")},
+		&dns.A{Hdr: dns.RR_Header{Name: dns.Fqdn("www." + zone), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("10.0.0.2")},
+		&dns.A{Hdr: dns.RR_Header{Name: dns.Fqdn("internal." + zone), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("10.0.0.3")},
+	}
+	addr, cleanup := startAXFRServer(t, zone, records)
+	defer cleanup()
+
+	r := New(nil, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	res, err := r.ZoneTransfer(ctx, zone, addr)
+	if err != nil {
+		t.Fatalf("ZoneTransfer: %v", err)
+	}
+	// Three non-SOA records were streamed; the two bracketing SOAs are excluded.
+	if res.RecordCount != 3 {
+		t.Errorf("RecordCount = %d, want 3 (SOAs excluded)", res.RecordCount)
+	}
+	// Two distinct owner names, sorted.
+	want := []string{"internal." + zone, "www." + zone}
+	if len(res.Hosts) != len(want) {
+		t.Fatalf("Hosts = %v, want %v", res.Hosts, want)
+	}
+	for i := range want {
+		if res.Hosts[i] != want[i] {
+			t.Errorf("Hosts[%d] = %q, want %q", i, res.Hosts[i], want[i])
+		}
+	}
+}
+
+// TestZoneTransfer_RefusedIsErrAXFRRefused verifies that a correctly-configured
+// nameserver that refuses the transfer yields ErrAXFRRefused, never a finding.
+func TestZoneTransfer_RefusedIsErrAXFRRefused(t *testing.T) {
+	addr, cleanup := startRefusingAXFRServer(t)
+	defer cleanup()
+
+	r := New(nil, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	res, err := r.ZoneTransfer(ctx, "secure.example.com", addr)
+	if !errors.Is(err, ErrAXFRRefused) {
+		t.Errorf("expected ErrAXFRRefused, got %v", err)
+	}
+	if res.RecordCount != 0 {
+		t.Errorf("a refused transfer must report 0 records, got %d", res.RecordCount)
+	}
+}
+
+// TestZoneTransfer_SOAOnlyIsRefused verifies that a server which returns only the
+// bracketing SOAs (no actual zone data) is treated as a refusal, not a leak —
+// the verdict hinges on non-SOA records.
+func TestZoneTransfer_SOAOnlyIsRefused(t *testing.T) {
+	const zone = "empty.example.com"
+	addr, cleanup := startAXFRServer(t, zone, nil)
+	defer cleanup()
+
+	r := New(nil, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := r.ZoneTransfer(ctx, zone, addr)
+	if !errors.Is(err, ErrAXFRRefused) {
+		t.Errorf("SOA-only transfer should be ErrAXFRRefused, got %v", err)
+	}
+}
+
+// TestZoneTransfer_TransportErrorIsNotRefusal verifies that a dial failure
+// (nothing listening) surfaces as a plain error distinct from ErrAXFRRefused, so
+// the detector treats it as indeterminate rather than "secure".
+func TestZoneTransfer_TransportErrorIsNotRefusal(t *testing.T) {
+	// Reserve then release a port so the dial reliably fails with connection
+	// refused.
+	pc, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := pc.Addr().String()
+	_ = pc.Close()
+
+	r := New(nil, 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err = r.ZoneTransfer(ctx, "dead.example.com", addr)
+	if err == nil {
+		t.Fatal("expected a transport error dialing a closed port")
+	}
+	if errors.Is(err, ErrAXFRRefused) {
+		t.Errorf("a transport failure must not be reported as ErrAXFRRefused: %v", err)
+	}
+}

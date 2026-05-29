@@ -146,6 +146,11 @@ var vectorRuleText = map[finding.Vector]struct {
 		"A DMARC rua/ruf report domain is claimable.",
 		"The DMARC policy's rua/ruf report URI points at an NXDOMAIN domain; an attacker who claims it intercepts every DMARC aggregate/forensic report sent for the domain.",
 	},
+	finding.VectorAXFR: {
+		"Unauthenticated DNS zone transfer (AXFR)",
+		"A nameserver allows unauthenticated AXFR.",
+		"A delegated nameserver streams the full zone to any client over AXFR, leaking every subdomain, internal hostname, and infrastructure record — a direct information disclosure and a force-multiplier for the other takeover vectors.",
+	},
 }
 
 // ruleForVector builds the SARIF rule descriptor for a vector. Unknown vectors
@@ -242,6 +247,10 @@ func sarifMessage(f finding.Finding) string {
 	case finding.VectorDMARC:
 		if f.DMARCURI != "" {
 			detail = "DMARC rua/ruf:" + f.DMARCURI
+		}
+	case finding.VectorAXFR:
+		if f.Service != "" {
+			detail = fmt.Sprintf("AXFR %s leaked %d host(s)", f.Service, len(f.LeakedHosts))
 		}
 	}
 	msg := fmt.Sprintf("[%s] %s takeover candidate on %s", f.Confidence, f.Vector, f.Subdomain)
