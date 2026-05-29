@@ -1,14 +1,14 @@
 # graverobber
 
-**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer, CAA misconfiguration, and dangling DANE TLSA pins.**
+**Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer, CAA misconfiguration, dangling DANE TLSA pins, and dangling MTA-STS policy hosts.**
 
 > Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, DKIM,
 > and DMARC takeover detection plus unauthenticated AXFR zone-transfer discovery,
-> CAA misconfiguration, and dangling DANE TLSA pins in one pipeline-friendly Go binary.
+> CAA misconfiguration, dangling DANE TLSA pins, and dangling MTA-STS policy hosts in one pipeline-friendly Go binary.
 
 `graverobber` is the only maintained Go binary that covers **CNAME**, **NS**,
 **SPF**, **MX**, **DKIM**, and **DMARC** takeover vectors plus **AXFR**
-zone-transfer, **CAA** misconfiguration, and dangling **DANE TLSA** pins in a single tool. It is a static binary with no
+zone-transfer, **CAA** misconfiguration, dangling **DANE TLSA** pins, and dangling **MTA-STS** policy hosts in a single tool. It is a static binary with no
 runtime, reads targets from stdin/file/flag, streams JSONL, and uses the
 exit-code conventions of the `httpx`/`subfinder` family so it drops straight into
 a recon pipeline.
@@ -28,6 +28,7 @@ a recon pipeline.
 | AXFR  | A delegated nameserver allows an unauthenticated zone transfer, leaking every record | Classic DNS misconfiguration; force-multiplier for every other vector |
 | CAA   | A `CAA` record names a CA domain that is NXDOMAIN and re-claimable, **or** uses the `*` wildcard authorising any CA to issue | Missing/weak certificate-issuance control → man-in-the-middle TLS |
 | TLSA  | A DANE `TLSA` pin at `_25._tcp.<mxhost>` covers an MX host that is NXDOMAIN — a dangling, DNSSEC-authenticated pin | Hard-fails inbound mail from DANE senders; reclaimable mail host → DANE-trusted interception (RFC 7672) |
+| MTA-STS | An MTA-STS policy is advertised (`v=STSv1` TXT at `_mta-sts.<domain>`) but the policy host `mta-sts.<domain>` is NXDOMAIN and re-claimable | Reclaimed policy host serves a forged policy (`mode: none` disables TLS enforcement, or an attacker `mx:` list redirects mail) → TLS downgrade / mail interception (RFC 8461) |
 
 Most scanners cover CNAME only. NS, SPF, MX, DKIM, and DMARC takeover are live,
 actively-exploited vectors that almost no Go tool handles. Together SPF, DKIM,
@@ -39,7 +40,11 @@ explicitly authorises any CA — re-opens the door to fraudulent TLS certificate
 TLSA closes the loop on the mail surface: a DANE pin left behind for a deleted
 mail host silently black-holes inbound mail and — because DANE for SMTP mandates
 DNSSEC — hands an attacker who reclaims that host a DANE-trusted mail-interception
-path.
+path. MTA-STS guards the same surface from the policy side: a domain that
+advertises MTA-STS but leaves its `mta-sts.<domain>` policy host dangling lets an
+attacker who reclaims that host serve a forged policy — `mode: none` to disable
+TLS enforcement outright, or an attacker-controlled `mx:` list to steer inbound
+mail — defeating the active-downgrade protection MTA-STS is meant to provide.
 
 ---
 
@@ -83,7 +88,7 @@ graverobber -l subs.txt --fingerprints ~/private.json
 graverobber -l subs.txt --offline
 
 # Skip vectors
-graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa
+graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa --no-mtasts
 
 # Probe a custom set of DKIM selectors instead of the built-in ESP defaults
 graverobber -l subs.txt --selectors default,google,s1,s2,k1
@@ -236,6 +241,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-axfr` | false | Skip AXFR zone-transfer misconfiguration checks |
 | `--no-caa` | false | Skip CAA (Certification Authority Authorization) misconfiguration checks |
 | `--no-tlsa` | false | Skip TLSA dangling-DANE-pin checks |
+| `--no-mtasts` | false | Skip MTA-STS dangling-policy-host checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
 | `--offline` | false | Cached/embedded fingerprints only, no network |
@@ -494,6 +500,36 @@ intentionally **not** flagged — only a present-but-orphaned pin is reported,
 keeping the vector low-noise. (A dangling MX host with *no* DANE pin is reported
 by the MX vector instead, not here.)
 
+### Dangling MTA-STS policy host (`--no-mtasts`)
+
+SMTP MTA Strict Transport Security (RFC 8461) lets a domain declare that sending
+mail servers **must** use TLS with a valid, matching certificate when delivering
+to it — closing the active downgrade and MX-redirection attacks that plain
+opportunistic STARTTLS allows. A domain opts in with two coupled pieces:
+
+- a `TXT` record at `_mta-sts.<domain>` carrying `v=STSv1; id=<policy-id>` — the
+  signal that a policy exists, and
+- a policy file served over HTTPS at
+  `https://mta-sts.<domain>/.well-known/mta-sts.txt`, listing the authorised MX
+  hosts and the enforcement mode. The policy host `mta-sts.<domain>` is, in
+  practice, a `CNAME` to a hosting provider (a CDN bucket, a SaaS MTA-STS host).
+
+When the policy host is decommissioned — the provider resource is released, the
+hosted zone is deleted, the subdomain is retired — but the `_mta-sts` `TXT` signal
+is left behind, you get a **dangling MTA-STS policy host**. An attacker who
+reclaims `mta-sts.<domain>` can serve an arbitrary policy file: a forged
+`mode: none` disables TLS enforcement wholesale (re-opening the downgrade attack
+MTA-STS exists to close), and a forged `mx:` list authorises the attacker's own
+mail server, steering inbound mail through it under a policy senders trust.
+
+graverobber resolves `_mta-sts.<target>`; if a `v=STSv1` policy signal is present
+it probes `mta-sts.<target>` for existence. A policy host that is NXDOMAIN is
+reported as a `POTENTIAL` `mtasts` finding, carrying the dangling policy host in
+`service` and the claimable `CNAME` target (or the policy host itself) in `cname`.
+A domain that does not advertise MTA-STS, or whose policy host still resolves, is
+the healthy case and is intentionally **not** flagged — only an advertised-but-
+orphaned policy host is reported.
+
 ---
 
 ## Confidence model
@@ -520,6 +556,7 @@ JSONL — one finding per line:
 {"subdomain":"spoofable.example.com","vector":"spf","confidence":"POTENTIAL","spf_all":"+all","evidence":"SPF policy ends in +all (Pass — authorises any host to send mail as the domain; domain is spoofable)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"axfr","service":"ns1.example.com","confidence":"CONFIRMED","nameservers":["ns1.example.com"],"leaked_hosts":["admin.example.com","vpn.example.com"],"evidence":"nameserver ns1.example.com allowed unauthenticated AXFR (412 records leaked; sample: admin.example.com, vpn.example.com)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"tlsa","confidence":"POTENTIAL","mx_hosts":["mx.deleted-vendor.invalid"],"tlsa_name":"_25._tcp.mx.deleted-vendor.invalid","evidence":"DANE TLSA pin published at _25._tcp.mx.deleted-vendor.invalid but MX host mx.deleted-vendor.invalid is NXDOMAIN (dangling DANE pin — hard-fails inbound mail; reclaimable for DANE-trusted interception)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"example.com","vector":"mtasts","service":"mta-sts.example.com","confidence":"POTENTIAL","cname":"policy.deleted-vendor.invalid","evidence":"MTA-STS policy advertised at _mta-sts.example.com but policy host mta-sts.example.com is NXDOMAIN (dangling MTA-STS host — reclaimable to serve a forged policy that disables TLS enforcement or redirects mail)","timestamp":"2026-05-28T12:00:00Z"}
 ```
 
 Without `--json`, findings render as one coloured human-readable line per

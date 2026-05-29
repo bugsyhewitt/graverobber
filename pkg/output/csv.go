@@ -144,6 +144,13 @@ func csvTarget(f finding.Finding) string {
 			return fmt.Sprintf("%s -> %s (NXDOMAIN)", f.TLSAName, f.MXHosts[0])
 		}
 		return f.TLSAName
+	case finding.VectorMTASTS:
+		// The dangling policy host and the claimable target it points at are the
+		// actionable datum.
+		if f.CNAME != "" && f.CNAME != f.Service {
+			return fmt.Sprintf("%s -> %s (NXDOMAIN)", f.Service, f.CNAME)
+		}
+		return fmt.Sprintf("%s (NXDOMAIN)", f.Service)
 	default:
 		return ""
 	}
