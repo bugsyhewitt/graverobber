@@ -114,6 +114,11 @@ func csvTarget(f finding.Finding) string {
 		if f.SPFLookups > 0 {
 			return fmt.Sprintf("%d DNS lookups (permerror)", f.SPFLookups)
 		}
+		// Deprecated-ptr sub-case has no remote target; the offending mechanism
+		// token (e.g. "+ptr" or "ptr:example.com") is the actionable datum.
+		if f.SPFPtr != "" {
+			return f.SPFPtr + " (deprecated)"
+		}
 		return ""
 	case finding.VectorNS:
 		return strings.Join(f.Nameservers, " ")

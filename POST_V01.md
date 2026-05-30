@@ -1405,6 +1405,101 @@ new dependency.
 
 ---
 
+## Rank 27 — SPF deprecated `ptr` mechanism detection (RFC 7208 §5.5) — ✅ IMPLEMENTED (Phase 2, Rotation 33)
+
+**Status:** Shipped. Rotation 33's directive named two candidates — **MX
+misconfiguration** and **TXT dangling-record** — and the verification step
+found both already covered: MX is Rank 3 (`detectors.MX`, `VectorMX`, shipped
+in Rotation 4), and TXT-record dangling cases are already shipped across the
+SPF (`include:`/`redirect=`/`a:`/`mx:`), DKIM, DMARC (`rua`/`ruf` mailto + https),
+BIMI (`l=`/`a=` URLs), TLSRPT (`rua`), and MTA-STS (TXT signal + policy host)
+vectors. With both named candidates implemented and the rest of the original
+ranked roadmap (R1–R26) shipped, this rotation completed the SPF vector's
+fourth and final RFC-named misconfiguration class: the **deprecated `ptr`
+mechanism**.
+
+Before R33 the SPF detector flagged three sub-cases — dangling reference
+(SubdoMailing takeover), permissive `+all`, and §4.6.4 lookup-limit breach.
+The `ptr` mechanism (RFC 7208 §5.2.4 / §5.5) authorises a sender whose PTR
+record (reverse-DNS lookup of the connecting IP) lands in the SPF domain,
+and §5.5 explicitly discourages publishing it: "Use of this mechanism is
+discouraged because it is slow, it is not as reliable as other mechanisms in
+cases of DNS errors, and it places a large burden on the .arpa name servers.
+… **SPF publishers SHOULD NOT include this mechanism in their SPF records**,
+and SHOULD use the `a` or `mx` mechanisms instead." Some SPF receivers
+already ignore `ptr` (treating the term as a no-op) and others return
+`permerror` on it — leaving the publisher's SPF result effectively undefined
+on those receivers and, under DMARC alignment, spoofable-by-omission on the
+same axis as the §4.6.4 lookup-limit breach. The SPF detector was already
+*counting* `ptr` for the §4.6.4 lookup tally (line 168 of `pkg/detectors/spf.go`)
+but never emitting a finding for its presence.
+
+`detectors.SPF` now adds the apex-only `spfDeprecatedPtr(record)` helper —
+which scans `strings.Fields(record)`, strips qualifier prefixes (`+`, `-`,
+`~`, `?`), case-insensitively matches a bare `ptr` token or a `ptr:<domain>`
+prefix, and returns the offending field verbatim so the operator can locate
+and remove the exact published term. The detector emits a POTENTIAL `spf`
+finding keyed on the apex (the publisher's misconfiguration), with the token
+carried in a new `SPFPtr string` `json:"spf_ptr,omitempty"` field and an
+evidence string that cites RFC 7208 §5.5 and "SHOULD NOT include it." Apex-
+only scope mirrors the permissive-`+all` and §4.6.4 sub-cases — the
+deprecation is the publisher's record-level misconfiguration, not a recursed
+include's; recursing would surface other publishers' historical decisions on
+records the target does not own. The sub-case is independent of the other
+three and can fire alongside them (a record can contain both `ptr` and
+`+all`, or `ptr` and a dangling include:, and each emits its own finding).
+
+Implemented as an **extension of the existing `spf` vector**, not a new
+vector: no new vector constant, no new CLI flag (covered by the existing
+`--no-spf` opt-out), one new finding field (`SPFPtr`). Output paths updated
+in lock-step: terminal renders `spf <token> (deprecated — RFC 7208 §5.5)`,
+CSV target column carries `<token> (deprecated)`, SARIF detail line cites
+RFC 7208 §5.5 and the rule descriptions list the fourth sub-case. The
+existing `--json`/JSONL emission already round-trips the new field via the
+struct tag.
+
+**Why this over MX misconfiguration / TXT dangling-record:** both named
+candidates were already implemented before this rotation began — MX has
+been a first-class vector since Rank 3, and TXT dangling-record cases are
+covered across SPF, DKIM, DMARC, BIMI, TLSRPT, and MTA-STS. The pivot
+target (per the rotation's correct-pivot protocol) was "the next best gap
+from CLAUDE.md's post-v0.1 directions," and the SPF vector's fourth
+RFC-named misconfiguration class — the §5.5 deprecated `ptr` mechanism —
+is a clean, DNS-only, binary-verdict gap with the same disposition class
+as the existing apex-only sub-cases (`+all`, §4.6.4 lookup-limit). The
+mechanism is already half-instrumented in the detector (counted for the
+§4.6.4 tally) but never flagged for its presence — exactly the kind of
+"second sub-case" completion pattern Ranks 20–26 used.
+
+Guarded by 5 new tests in `pkg/detectors/detectors_test.go`:
+`TestSPFDeprecatedPtr` (16-case table-driven parser test covering bare,
+qualifier-prefixed, `ptr:<domain>`, case-insensitive, mixed-with-other-
+mechanisms, and the substring/short-prefix false-positive guards),
+`TestSPF_DeprecatedPtrPotential` (end-to-end: exactly one POTENTIAL
+finding with `SPFPtr` set, other SPF fields empty, evidence cites
+§5.5), `TestSPF_DeprecatedPtrWithDomainPreservesToken` (the
+`+ptr:legacy.example.org` form is preserved verbatim, qualifier and
+all), `TestSPF_NoPtrNoDeprecatedFinding` (regression guard against
+substring false-positives like `a:ptraffic.example.com` or
+`include:permitter.example.com`), and
+`TestSPF_DeprecatedPtrAndPermissiveBothFire` (independence with the
+`+all` sub-case: a `v=spf1 ptr +all` policy emits both findings). Plus
+extended cases in `TestTerminalWriter_RendersDetailForEveryVector`
+(terminal), `TestCSV_TargetColumnPerVector` (CSV), and
+`TestSARIF_MessageSurfacesVectorDetail` (SARIF). Full suite green under
+`-race`, `go vet` clean, README and the SPF vector summary table
+updated.
+
+**Schema:** one new `Finding` field (`SPFPtr string`
+`json:"spf_ptr,omitempty"`); no new vector constant, no new CLI flag.
+The existing `--no-spf` opt-out covers the new sub-case.
+
+**Complexity:** Low — one detector helper + one emit block, four
+output-path updates, six new tests + three extended output tests,
+README + POST_V01 updates. No new dependency.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -1451,3 +1546,4 @@ new dependency.
 | 24 | SPF DNS-lookup-limit (§4.6.4 `permerror`) detection ✅ | Low | High (completes SPF coverage, spoofable-by-omission via DMARC alignment collapse) | Yes (new field, no flag) |
 | 25 | DNSSEC weak/deprecated algorithm detection (RFC 8624) ✅ | Low-Med | High (completes DNSSEC coverage, forgeable chain of trust) | Yes (new field, no flag) |
 | 26 | NS partial-lame delegation detection (RFC 1912 §2.8) ✅ | Low | High (completes NS coverage, partial-hijack precondition when lame NS sits at a takeoverable provider) | No (2nd sub-case of `ns`, reuses field + flag) |
+| 27 | SPF deprecated `ptr` mechanism detection (RFC 7208 §5.5) ✅ | Low | Medium-High (completes SPF coverage, present-but-undefined-on-receivers — spoofable-by-omission under DMARC alignment) | Yes (new `SPFPtr` field, no flag — extends `spf`) |

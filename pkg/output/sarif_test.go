@@ -163,6 +163,7 @@ func TestSARIF_MessageSurfacesVectorDetail(t *testing.T) {
 		{"cname", finding.Finding{Subdomain: "a.example.com", Vector: finding.VectorCNAME, Service: "AWS/S3", Confidence: finding.Confirmed, CNAME: "a.s3.amazonaws.com"}, "a.s3.amazonaws.com"},
 		{"spf", finding.Finding{Subdomain: "example.com", Vector: finding.VectorSPF, Confidence: finding.Potential, SPFInclude: "claimable.net"}, "claimable.net"},
 		{"spf-lookup-limit", finding.Finding{Subdomain: "permerror.example.com", Vector: finding.VectorSPF, Confidence: finding.Potential, SPFLookups: 14}, "permerror"},
+		{"spf-deprecated-ptr", finding.Finding{Subdomain: "ptr-user.example.com", Vector: finding.VectorSPF, Confidence: finding.Potential, SPFPtr: "+ptr"}, "§5.5"},
 		{"ns", finding.Finding{Subdomain: "example.com", Vector: finding.VectorNS, Confidence: finding.Confirmed, Nameservers: []string{"ns1.gone.net"}}, "ns1.gone.net"},
 		{"mx", finding.Finding{Subdomain: "example.com", Vector: finding.VectorMX, Confidence: finding.Confirmed, MXHosts: []string{"mail.gone.net"}}, "mail.gone.net"},
 		{"dkim", finding.Finding{Subdomain: "example.com", Vector: finding.VectorDKIM, Confidence: finding.Confirmed, DKIMSelector: "s1", CNAME: "s1.domainkey.gone.sendgrid.net"}, "s1.domainkey.gone.sendgrid.net"},

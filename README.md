@@ -21,7 +21,7 @@ a recon pipeline.
 |---|---|---|
 | CNAME | Dangling CNAME → fingerprint match against a known-vulnerable service | The classic takeover; ~60+ services covered |
 | NS    | Delegated DNS hosted zone deleted at the provider (every NS `SERVFAIL`s) and re-claimable, **or** the delegation is partially lame — some NS answer authoritatively, some `SERVFAIL`/`REFUSE` (RFC 1912 §2.8) — and any lame NS hostname belongs to a takeoverable provider, a partial-hijack precondition | Hazy Hawk (.edu campaign, 2025–2026); lame delegations cause intermittent outages and, when the lame NS sits at a re-creatable provider, let an attacker control answers for the fraction of resolver queries that hit it |
-| SPF   | An SPF `include:`/`redirect=`/`a:`/`mx:` directive points at an unregistered, claimable domain, the policy ends in `+all` (Pass — any host may send mail as the domain), **or** the recursed evaluation exceeds the RFC 7208 §4.6.4 ten-lookup cap (`permerror` — SPF hard-fails everywhere) | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day; `+all` = fully spoofable domain; lookup-explosion `permerror` = the same spoofable-by-omission outcome under DMARC alignment |
+| SPF   | An SPF `include:`/`redirect=`/`a:`/`mx:` directive points at an unregistered, claimable domain, the policy ends in `+all` (Pass — any host may send mail as the domain), the recursed evaluation exceeds the RFC 7208 §4.6.4 ten-lookup cap (`permerror` — SPF hard-fails everywhere), **or** the apex record contains a `ptr` mechanism (RFC 7208 §5.5 deprecated — SHOULD NOT be published; ignored or `permerror` on many receivers) | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day; `+all` = fully spoofable domain; lookup-explosion `permerror` = the same spoofable-by-omission outcome under DMARC alignment; deprecated `ptr` = SPF result effectively undefined on conforming receivers |
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, **or** publishes an inline RSA key below the RFC 8301 1024-bit floor | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012) |
 | DMARC | A `_dmarc` policy is monitor-only (`p=none`, spoofable) **or** its `rua=`/`ruf=` report host — a `mailto:` domain or `https:` collector host — is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon; `p=none` spoofing (BEC/phishing precondition) |
@@ -255,7 +255,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--silent` | false | Results only, suppress progress/banner |
 | `--verbose` | false | Verbose debug logging to stderr |
 | `--no-ns` | false | Skip NS delegation checks (zone-deleted strict-unanimity + partial-lame delegation) |
-| `--no-spf` | false | Skip SPF `include:`/`redirect=`/`a:`/`mx:` dangling, `+all` permissive-policy, and RFC 7208 §4.6.4 DNS-lookup-limit checks |
+| `--no-spf` | false | Skip SPF `include:`/`redirect=`/`a:`/`mx:` dangling, `+all` permissive-policy, RFC 7208 §4.6.4 DNS-lookup-limit, and RFC 7208 §5.5 deprecated-`ptr`-mechanism checks |
 | `--no-mx` | false | Skip MX dangling-record checks |
 | `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME + weak inline RSA key) |
 | `--no-dmarc` | false | Skip DMARC report-host dangling + `p=none` checks |
@@ -318,8 +318,9 @@ above a `confirmed` threshold. The default (flag omitted) emits every finding.
 
 ### SPF policy takeover (`--no-spf`)
 
-graverobber flags three classes of SPF weakness: a **dangling reference**, a
-**permissive policy**, and an **RFC 7208 §4.6.4 DNS-lookup-limit breach**.
+graverobber flags four classes of SPF weakness: a **dangling reference**, a
+**permissive policy**, an **RFC 7208 §4.6.4 DNS-lookup-limit breach**, and use
+of the **RFC 7208 §5.5 deprecated `ptr` mechanism**.
 
 **Dangling reference.** An SPF record can authorise another domain to send mail
 as the target four ways, and all four are exploitable when that domain is
@@ -382,7 +383,25 @@ finding keyed on the target itself, with the offending count in the
 recursion on include loops (which are independently a `permerror`, RFC 7208
 §4.6.4) without distorting the count.
 
-All three sub-cases are DNS-only signals with no fingerprint — classified
+**Deprecated `ptr` mechanism.** [RFC 7208 §5.5](https://www.rfc-editor.org/rfc/rfc7208#section-5.5)
+explicitly discourages publishing the `ptr` mechanism: "Use of this mechanism is
+discouraged because it is slow, it is not as reliable as other mechanisms in
+cases of DNS errors, and it places a large burden on the .arpa name servers. …
+**SPF publishers SHOULD NOT include this mechanism in their SPF records**, and
+SHOULD use the `a` or `mx` mechanisms instead." The mechanism passes when the
+connecting IP's reverse-DNS PTR record lands in the SPF domain, but some
+receivers already ignore it (treating the term as a no-op) and others return
+`permerror` on it — leaving the publisher's SPF result effectively undefined on
+those receivers and, under DMARC alignment, spoofable-by-omission on the same
+axis as a §4.6.4 lookup-limit breach. graverobber flags any `ptr` token in the
+apex SPF record (bare `ptr`, qualifier-prefixed `+ptr`/`-ptr`/`~ptr`/`?ptr`, or
+the explicit-domain form `ptr:<domain>`) and emits a `POTENTIAL` `spf` finding
+keyed on the target itself, with the offending token preserved verbatim in the
+`spf_ptr` field so the operator can locate and remove the exact published
+field. Apex-only like the permissive sub-case: the deprecation is the
+publisher's misconfiguration of their own record.
+
+All four sub-cases are DNS-only signals with no fingerprint — classified
 `POTENTIAL` like the rest of the email-auth surface — and can fire independently
 for the same record.
 
