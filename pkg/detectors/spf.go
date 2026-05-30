@@ -22,9 +22,11 @@ const maxSPFDepth = 10
 // (under DMARC alignment) leaves the domain spoofable by omission.
 const maxSPFLookups = 10
 
-// SPF detects three classes of SPF weakness on a domain: a dangling reference
-// (the SubdoMailing takeover), a permissive "all" mechanism, and a record that
-// exceeds the RFC 7208 §4.6.4 DNS-lookup cap (a "permerror"-by-design policy).
+// SPF detects four classes of SPF weakness on a domain: a dangling reference
+// (the SubdoMailing takeover), a permissive "all" mechanism, a record that
+// exceeds the RFC 7208 §4.6.4 DNS-lookup cap (a "permerror"-by-design policy),
+// and use of the deprecated "ptr" mechanism (RFC 7208 §5.5 — "SHOULD NOT be
+// published").
 //
 // Dangling-reference sub-case. Four SPF directives reference an external
 // domain and are therefore equally exploitable when that domain is unregistered:
@@ -67,6 +69,25 @@ const maxSPFLookups = 10
 // offending token is carried in SPFAll and the finding is keyed on the target
 // itself (not an external domain), so it is emitted once per record.
 //
+// Deprecated-ptr sub-case. The "ptr" mechanism (RFC 7208 §5.2.4 / §5.5)
+// authorises a sender whose PTR record (reverse-DNS lookup of the connecting
+// IP) lands in the SPF domain. §5.5 explicitly discourages it: "Use of this
+// mechanism is discouraged because it is slow, it is not as reliable as other
+// mechanisms in cases of DNS errors, and it places a large burden on the
+// .arpa name servers. If used, proper PTR records have to be in place for the
+// domain's hosts and the mechanism SHOULD be one of the last mechanisms
+// checked. SPF publishers SHOULD NOT include this mechanism in their SPF
+// records, and SHOULD use the "a" or "mx" mechanisms instead." Some receivers
+// already ignore ptr or treat it as a permerror, which makes the publisher's
+// SPF result effectively undefined and — under DMARC alignment — leaves the
+// domain spoofable-by-omission on the same axis as the §4.6.4 lookup-limit
+// breach. graverobber emits a Potential sub-case keyed on the apex when the
+// apex policy contains any "ptr" mechanism (bare or "ptr:<domain>"). The
+// offending token is carried in SPFPtr. Checked only against the apex record
+// (not recursed includes): the deprecation is the publisher's misconfigura-
+// tion, so it is reported on the record graverobber is auditing. This mirrors
+// the apex-only scope of the permissive-"+all" sub-case.
+//
 // Lookup-limit sub-case. RFC 7208 §4.6.4 caps an SPF evaluation at ten
 // DNS-querying mechanisms and modifiers — include, a, mx, ptr, exists, and
 // redirect= each count as one; ip4, ip6, exp, all, and the version tag do not.
@@ -81,10 +102,12 @@ const maxSPFLookups = 10
 //  1. Resolve TXT records (resolver.TXT) and extract the SPF policy.
 //  2. If the record's all mechanism qualifies as Pass, emit a Potential
 //     permissive finding keyed on the target.
-//  3. Parse include: mechanisms and the redirect= modifier, recursing up to
+//  3. If the apex record contains any "ptr" mechanism, emit a Potential
+//     deprecated-ptr finding keyed on the target (RFC 7208 §5.5).
+//  4. Parse include: mechanisms and the redirect= modifier, recursing up to
 //     maxSPFDepth; for each referenced domain that is NXDOMAIN (claimable), emit
 //     a Potential dangling finding.
-//  4. Walk the recursed policy graph and tally every DNS-querying mechanism
+//  5. Walk the recursed policy graph and tally every DNS-querying mechanism
 //     and modifier; if the total exceeds maxSPFLookups, emit a Potential
 //     lookup-limit finding keyed on the target.
 func SPF(ctx context.Context, target string, r *resolver.Resolver) ([]finding.Finding, error) {
@@ -111,6 +134,26 @@ func SPF(ctx context.Context, target string, r *resolver.Resolver) ([]finding.Fi
 			Confidence: finding.Potential,
 			SPFAll:     token,
 			Evidence:   "SPF policy ends in " + token + " (Pass — authorises any host to send mail as the domain; domain is spoofable)",
+		})
+	}
+
+	// Deprecated-ptr sub-case: the apex policy contains a "ptr" mechanism.
+	// RFC 7208 §5.5 — "SHOULD NOT be published" — and many SPF receivers
+	// either ignore the mechanism or treat it as permerror, leaving the
+	// publisher's SPF result effectively undefined. Keyed on the target itself
+	// (the publisher's misconfiguration), apex-only like the permissive
+	// sub-case. The first ptr token observed is reported; multiple ptr
+	// mechanisms still collapse to a single finding (one record, one
+	// misconfiguration). It is independent of the other sub-cases — a record
+	// can contain both "ptr" and "+all", or "ptr" and a dangling include:, and
+	// each sub-case emits its own finding.
+	if token := spfDeprecatedPtr(spfRecord); token != "" {
+		findings = append(findings, finding.Finding{
+			Subdomain:  target,
+			Vector:     finding.VectorSPF,
+			Confidence: finding.Potential,
+			SPFPtr:     token,
+			Evidence:   "SPF policy contains the " + token + " mechanism (RFC 7208 §5.5 deprecated — slow, unreliable, and ignored or treated as permerror by some receivers; SPF publishers SHOULD NOT include it)",
 		})
 	}
 
@@ -219,6 +262,32 @@ func spfPermissiveAll(record string) string {
 	for _, field := range strings.Fields(record) {
 		switch {
 		case strings.EqualFold(field, "all"), strings.EqualFold(field, "+all"):
+			return field
+		}
+	}
+	return ""
+}
+
+// spfDeprecatedPtr reports the first offending "ptr" mechanism token observed
+// in an SPF record, or "" when none is present. The "ptr" mechanism (RFC 7208
+// §5.2.4) may appear bare ("ptr") or with an explicit domain argument
+// ("ptr:<domain>"); both forms are flagged. A qualifier prefix ("+", "-", "~",
+// "?") is preserved in the returned token so the evidence string names the
+// exact field the operator should remove from their published record (e.g.
+// "+ptr" vs "ptr:example.com"). The mechanism name is matched case-
+// insensitively (consistent with spfPermissiveAll), and the surrounding
+// strings.Fields split protects against partial-token false matches: a TXT
+// fragment like "permitter" or "ptraffic.example.com" never matches because
+// neither is a standalone token of the form "ptr"/"+ptr"/"ptr:..." after
+// qualifier stripping.
+func spfDeprecatedPtr(record string) string {
+	for _, field := range strings.Fields(record) {
+		// Strip the optional qualifier prefix the same way spfQueryingMechanisms
+		// does for ptr — qualifiers are not letters, so the lowercased name is
+		// what we test for the bare/colon-prefix forms.
+		mech := strings.TrimLeft(field, "+-~?")
+		lower := strings.ToLower(mech)
+		if lower == "ptr" || strings.HasPrefix(lower, "ptr:") {
 			return field
 		}
 	}

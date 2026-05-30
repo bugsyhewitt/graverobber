@@ -235,6 +235,19 @@ type Finding struct {
 	// down DMARC alignment and exposing the domain to spoofing-by-omission. The
 	// field is zero (omitted) for every other sub-case.
 	SPFLookups int `json:"spf_lookups,omitempty"`
+	// SPFPtr is set for the deprecated-ptr-mechanism VectorSPF sub-case: the
+	// offending SPF token containing a "ptr" mechanism (a bare "ptr" or a
+	// "ptr:<domain>" form, with any qualifier prefix preserved, e.g. "+ptr" or
+	// "-ptr:example.com"). RFC 7208 §5.5 explicitly discourages use of the ptr
+	// mechanism — "SHOULD NOT be published" — because it is slow, unreliable in
+	// the face of DNS errors, and places an unfair load on the in-addr.arpa /
+	// ip6.arpa name servers. Implementations are RECOMMENDED to ignore it (some
+	// SPF receivers already do, returning permerror or treating it as a no-op),
+	// which makes the publisher's SPF result effectively undefined on those
+	// receivers — a present-but-broken email-auth term, the same disposition
+	// class as p=none and the §4.6.4 lookup-limit breach. The field is empty
+	// for every other sub-case.
+	SPFPtr string `json:"spf_ptr,omitempty"`
 	// MXHosts is set for VectorMX findings: the dangling mail-exchanger hostnames.
 	MXHosts []string `json:"mx_hosts,omitempty"`
 	// DKIMSelector is set for VectorDKIM findings: the selector whose

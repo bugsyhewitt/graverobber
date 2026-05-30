@@ -115,6 +115,17 @@ func TestTerminalWriter_RendersDetailForEveryVector(t *testing.T) {
 			wantSub: []string{"permerror.example.com", "12", "permerror"},
 		},
 		{
+			// R33 deprecated-ptr sub-case (RFC 7208 §5.5): the terminal must
+			// surface the offending mechanism token and name the deprecation
+			// so the operator can find and remove it from the published record.
+			name: "spf-deprecated-ptr",
+			f: finding.Finding{
+				Subdomain: "ptr-user.example.com", Vector: finding.VectorSPF,
+				Confidence: finding.Potential, SPFPtr: "+ptr",
+			},
+			wantSub: []string{"ptr-user.example.com", "+ptr", "deprecated"},
+		},
+		{
 			name: "ns",
 			f: finding.Finding{
 				Subdomain: "example.com", Vector: finding.VectorNS,

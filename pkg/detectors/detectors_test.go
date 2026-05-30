@@ -1972,6 +1972,200 @@ func TestSPF_DNSLookupLimitCycleSafe(t *testing.T) {
 	}
 }
 
+// TestSPFDeprecatedPtr is a table-driven check of the §5.5 ptr-mechanism
+// parser: the bare and "ptr:<domain>" forms (with and without qualifier
+// prefixes) must be flagged; bystander tokens that merely contain the
+// substring "ptr" or share a short prefix must not match. The returned token
+// preserves the qualifier prefix so the evidence string names the exact field
+// the operator should remove.
+func TestSPFDeprecatedPtr(t *testing.T) {
+	cases := []struct {
+		record string
+		want   string
+	}{
+		// Bare and qualifier-prefixed bare ptr.
+		{"v=spf1 ptr -all", "ptr"},
+		{"v=spf1 +ptr -all", "+ptr"},
+		{"v=spf1 -ptr ~all", "-ptr"},
+		{"v=spf1 ?ptr ~all", "?ptr"},
+		{"v=spf1 ~ptr -all", "~ptr"},
+		// ptr:<domain> with and without qualifier.
+		{"v=spf1 ptr:example.com -all", "ptr:example.com"},
+		{"v=spf1 +ptr:example.com -all", "+ptr:example.com"},
+		// Case-insensitive on the mechanism name.
+		{"v=spf1 PTR -all", "PTR"},
+		{"v=spf1 +PTR:Example.COM -all", "+PTR:Example.COM"},
+		// Mixed with other mechanisms; the ptr is still flagged.
+		{"v=spf1 ip4:192.0.2.0/24 include:_spf.google.com ptr -all", "ptr"},
+		// No-match cases — clean policies and bystanders that merely contain
+		// "ptr" or share a short prefix must not false-positive.
+		{"v=spf1 ip4:192.0.2.0/24 -all", ""},
+		{"v=spf1 include:_spf.google.com -all", ""},
+		{"v=spf1 mx a:host.example.com -all", ""},
+		{"v=spf1 a:ptraffic.example.com -all", ""}, // domain happens to contain "ptr" — not a bare ptr token
+		{"v=spf1 include:permitter.example.com -all", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := spfDeprecatedPtr(c.record); got != c.want {
+			t.Errorf("spfDeprecatedPtr(%q) = %q, want %q", c.record, got, c.want)
+		}
+	}
+}
+
+// TestSPF_DeprecatedPtrPotential drives the full SPF detector against a record
+// that contains a bare "ptr" mechanism: it must yield exactly one Potential
+// VectorSPF finding keyed on the target with SPFPtr set, all other SPF fields
+// empty, and an evidence string that names RFC 7208 §5.5.
+func TestSPF_DeprecatedPtrPotential(t *testing.T) {
+	const target = "ptr-user.example.com"
+	record := "v=spf1 ip4:192.0.2.0/24 ptr -all"
+
+	addr, cleanup := spfDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Vector != finding.VectorSPF {
+		t.Errorf("vector: got %q, want spf", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("confidence: got %q, want POTENTIAL", f.Confidence)
+	}
+	if f.Subdomain != target {
+		t.Errorf("subdomain: got %q, want the target %q (deprecated-ptr sub-case is keyed on the target)", f.Subdomain, target)
+	}
+	if f.SPFPtr != "ptr" {
+		t.Errorf("spf_ptr: got %q, want %q", f.SPFPtr, "ptr")
+	}
+	if f.SPFInclude != "" {
+		t.Errorf("spf_include: got %q, want empty for the deprecated-ptr sub-case", f.SPFInclude)
+	}
+	if f.SPFAll != "" {
+		t.Errorf("spf_all: got %q, want empty for the deprecated-ptr sub-case", f.SPFAll)
+	}
+	if f.SPFLookups != 0 {
+		t.Errorf("spf_lookups: got %d, want 0 for the deprecated-ptr sub-case", f.SPFLookups)
+	}
+	if !strings.Contains(f.Evidence, "ptr") {
+		t.Errorf("evidence: got %q, want it to mention ptr", f.Evidence)
+	}
+	if !strings.Contains(f.Evidence, "§5.5") {
+		t.Errorf("evidence: got %q, want it to cite RFC 7208 §5.5", f.Evidence)
+	}
+}
+
+// TestSPF_DeprecatedPtrWithDomainPreservesToken verifies the "ptr:<domain>"
+// form with a qualifier prefix is reported verbatim (so the operator can find
+// and remove the exact published field), not normalised away.
+func TestSPF_DeprecatedPtrWithDomainPreservesToken(t *testing.T) {
+	const target = "ptr-domain.example.com"
+	record := "v=spf1 +ptr:legacy.example.org -all"
+
+	addr, cleanup := spfDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	var saw *finding.Finding
+	for i := range findings {
+		if findings[i].SPFPtr != "" {
+			saw = &findings[i]
+			break
+		}
+	}
+	if saw == nil {
+		t.Fatalf("expected a deprecated-ptr finding, got none (all findings: %+v)", findings)
+	}
+	if saw.SPFPtr != "+ptr:legacy.example.org" {
+		t.Errorf("spf_ptr: got %q, want %q (qualifier and domain argument must be preserved)", saw.SPFPtr, "+ptr:legacy.example.org")
+	}
+}
+
+// TestSPF_NoPtrNoDeprecatedFinding verifies a clean policy (no ptr mechanism)
+// produces no deprecated-ptr finding. Regression guard against substring
+// false-positives on tokens like "permitter" or "a:ptraffic.example.com".
+func TestSPF_NoPtrNoDeprecatedFinding(t *testing.T) {
+	const target = "clean.example.com"
+	record := "v=spf1 ip4:192.0.2.0/24 include:_spf.google.com a:ptraffic.example.com -all"
+
+	addr, cleanup := spfDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	for _, f := range findings {
+		if f.SPFPtr != "" {
+			t.Errorf("unexpected deprecated-ptr finding on clean policy: %+v", f)
+		}
+	}
+}
+
+// TestSPF_DeprecatedPtrAndPermissiveBothFire confirms the deprecated-ptr and
+// permissive-"+all" sub-cases are independent and can both fire for one
+// record. This mirrors TestSPF_PermissiveAndDanglingBothFire for the new
+// sub-case and guards against accidental short-circuiting between apex-only
+// sub-cases.
+func TestSPF_DeprecatedPtrAndPermissiveBothFire(t *testing.T) {
+	const target = "doubly-broken-ptr.example.com"
+	record := "v=spf1 ptr +all"
+
+	addr, cleanup := spfDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := SPF(ctx, target, r)
+	if err != nil {
+		t.Fatalf("SPF: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings (permissive + deprecated-ptr), got %d: %+v", len(findings), findings)
+	}
+	var sawPermissive, sawPtr bool
+	for _, f := range findings {
+		if f.Vector != finding.VectorSPF {
+			t.Errorf("vector: got %q, want spf", f.Vector)
+		}
+		switch {
+		case f.SPFAll != "":
+			sawPermissive = true
+		case f.SPFPtr != "":
+			sawPtr = true
+		}
+	}
+	if !sawPermissive {
+		t.Errorf("missing permissive sub-case finding (findings: %+v)", findings)
+	}
+	if !sawPtr {
+		t.Errorf("missing deprecated-ptr sub-case finding (findings: %+v)", findings)
+	}
+}
+
 // ---- DKIM weak inline key sub-vector ---------------------------------------
 
 // Pre-generated RSA public keys (base64 DER SubjectPublicKeyInfo, the RFC 6376

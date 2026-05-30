@@ -128,9 +128,9 @@ var vectorRuleText = map[finding.Vector]struct {
 		"The subdomain delegates DNS to a provider whose hosted zone has been deleted; an attacker who re-creates the zone controls all records for the subdomain.",
 	},
 	finding.VectorSPF: {
-		"SPF dangling reference, permissive policy, or DNS-lookup-limit breach",
-		"An SPF record references an unregistered domain, authorises any sender, or exceeds the RFC 7208 §4.6.4 ten-lookup cap.",
-		"The domain's SPF record is either dangling — an include:/redirect=/a:/mx: directive points at an unregistered (NXDOMAIN) domain, so registering it lets an attacker authorise spoofed mail (the SubdoMailing vector) — or permissive: a Pass-qualified \"all\" mechanism (+all, or a bare \"all\") authorises every host on the internet to send mail as the domain, leaving it fully spoofable — or it exceeds the RFC 7208 §4.6.4 cap of ten DNS-querying mechanisms and modifiers (include, a, mx, ptr, exists, redirect=) across the recursed evaluation, which MUST produce a \"permerror\" at every conforming SPF receiver, hard-failing the SPF check and collapsing DMARC alignment so spoofed mail passes by omission.",
+		"SPF dangling reference, permissive policy, DNS-lookup-limit breach, or deprecated ptr mechanism",
+		"An SPF record references an unregistered domain, authorises any sender, exceeds the RFC 7208 §4.6.4 ten-lookup cap, or uses the RFC 7208 §5.5 deprecated ptr mechanism.",
+		"The domain's SPF record is either dangling — an include:/redirect=/a:/mx: directive points at an unregistered (NXDOMAIN) domain, so registering it lets an attacker authorise spoofed mail (the SubdoMailing vector) — or permissive: a Pass-qualified \"all\" mechanism (+all, or a bare \"all\") authorises every host on the internet to send mail as the domain, leaving it fully spoofable — or it exceeds the RFC 7208 §4.6.4 cap of ten DNS-querying mechanisms and modifiers (include, a, mx, ptr, exists, redirect=) across the recursed evaluation, which MUST produce a \"permerror\" at every conforming SPF receiver, hard-failing the SPF check and collapsing DMARC alignment so spoofed mail passes by omission — or it contains the \"ptr\" mechanism, which RFC 7208 §5.5 explicitly discourages (\"SPF publishers SHOULD NOT include this mechanism in their SPF records\") because it is slow, unreliable in the face of DNS errors, and places an unfair load on the in-addr.arpa name servers; some receivers ignore it or treat it as permerror, leaving the publisher's SPF result effectively undefined on those receivers and (under DMARC alignment) spoofable-by-omission on the same axis as the §4.6.4 lookup-limit breach.",
 	},
 	finding.VectorMX: {
 		"Dangling MX record takeover",
@@ -267,6 +267,8 @@ func sarifMessage(f finding.Finding) string {
 			detail = "SPF " + f.SPFAll + " (permissive — any host)"
 		case f.SPFLookups > 0:
 			detail = fmt.Sprintf("SPF %d DNS lookups (>10 — permerror, SPF hard-fails)", f.SPFLookups)
+		case f.SPFPtr != "":
+			detail = fmt.Sprintf("SPF %s mechanism (RFC 7208 §5.5 deprecated — SHOULD NOT be published)", f.SPFPtr)
 		}
 	case finding.VectorNS:
 		if len(f.Nameservers) > 0 {
