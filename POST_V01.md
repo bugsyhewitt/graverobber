@@ -1303,6 +1303,108 @@ extended JSONL guard, README + POST_V01 updates. No new dependency
 
 ---
 
+## Rank 26 — NS partial-lame delegation detection — ✅ IMPLEMENTED (Phase 2, Rotation 32)
+
+**Status:** Shipped. Rotation 32's directive named two candidates — **NS lame-
+delegation strict-case** or **CAA issuer-mismatch** — as the next DNS audit
+vector. Assessment found:
+
+- **CAA issuer-mismatch was rejected** as ambiguous. Detecting "the CA domain in
+  `issue=` exists but is not actually a CA" requires either a curated allow-list
+  of legitimate CAs (which dates badly: ACME relays, private CAs, regional CAs)
+  or fuzzy typo-distance heuristics. Both produce a high false-positive rate on
+  legitimate niche configurations — the opposite of graverobber's
+  false-negative-over-false-positive disposition. The existing CAA detector
+  (Ranks 16 + 20) already covers the high-signal CAA sub-cases (dangling
+  `issue`/`issuewild`, dangling `iodef`, permissive `*`).
+- **NS lame-delegation strict-case was implemented** as the second sub-case of
+  the `ns` vector — a high-signal, DNS-only completion of the existing NS
+  surface that exactly mirrors the SPF (`redirect=`/`a:`/`mx:`), DKIM (weak
+  inline key), DMARC (`p=none` + `https:` report URI), CAA (`iodef`), and
+  DNSSEC (weak algorithm) second-sub-case dispositions.
+
+Before R32 the NS detector only fired in the strict-unanimity case: every
+delegated nameserver returns SERVFAIL/REFUSED for the zone SOA → hosted zone
+deleted. It short-circuited on the first nameserver that answered
+authoritatively, **silently missing** the partial-lame case (RFC 1912 §2.8):
+the parent delegation lists nameservers that are not actually authoritative
+for the zone — some answer, some don't. Partial-lame delegation is a real DNS
+misconfiguration in its own right (it causes intermittent
+timeout-and-retry-and-eventually-SERVFAIL outages that hit a fraction of
+resolver queries, are hard to reproduce, and are a textbook cause of
+"sometimes works, sometimes doesn't" reports). It is also a **partial-hijack
+precondition**: when a lame NS hostname belongs to a takeoverable cloud DNS
+provider (the existing indianajson/can-i-take-over-dns suffix list, already
+loaded by Rank 4), an attacker who re-creates the zone at that provider
+controls the answers returned for the fraction of resolver queries that hit
+the lame NS — without ever owning the full delegation.
+
+`detectors.NS` now queries EVERY delegated nameserver via
+`r.AuthoritativeSOA` and partitions them into `lame` (`ErrZoneDeleted`) and
+`live` (success). Transport errors (timeouts, malformed responses) are
+deliberately classified as "unknown" and excluded from BOTH partitions, so a
+single dropped UDP packet against one nameserver never produces a finding on
+its own — consistent with the tool's preference for false negatives over
+false positives. The dispatch:
+
+- **All lame** → the existing zone-deleted sub-case (unchanged: all
+  nameservers in `Nameservers`, original Evidence wording, CONFIRMED when a
+  provider matches else POTENTIAL).
+- **Some lame, some live** → the new partial-lame sub-case: a POTENTIAL `ns`
+  finding listing ONLY the lame nameservers (the ones the operator must fix
+  at the registrar), with Evidence naming the partial-lame ratio (e.g.
+  `1 of 3`). Confidence is upgraded to CONFIRMED when any lame NS matches a
+  known takeoverable provider — the partial-hijack precondition.
+- **All live (or only transport errors)** → no finding.
+
+Implemented as an **extension of the existing `ns` vector**, not a new
+vector: no new vector constant, no new finding field (reuses `Nameservers`),
+no new CLI flag (covered by the existing `--no-ns` opt-out). One new
+test-only seam in the resolver: `SetSOANameserverRewriteForTest` (mirroring
+`SetAXFRPortForTest`) maps a nameserver hostname to a dial address so the
+cross-package detector tests can drive multiple distinct child SOA servers
+on unprivileged ephemeral ports without binding port 53. The terminal output
+now distinguishes the partial-lame sub-case as `ns partial-lame [...]`
+(JSONL/CSV/SARIF paths already serialise the full `Finding`; the Evidence
+string is the canonical sub-case discriminator).
+
+Guarded by 6 new detector tests in `pkg/detectors/ns_test.go` (driven by a
+local-UDP `nsDelegationServer` harness that stands up a parent NS server
+plus one child SOA server per nameserver, with a behaviour map
+`live`/`lame`/`unknown`): `TestNS_PartialLamePotential` (one live + one
+lame → 1 POTENTIAL finding, only the lame NS listed),
+`TestNS_PartialLameKnownProviderConfirmed` (lame NS at `awsdns` →
+CONFIRMED), `TestNS_AllLameZoneDeletedSubCase` (strict-unanimity case
+unchanged, original wording), `TestNS_AllLiveNoFinding` (healthy delegation
+→ 0 findings), `TestNS_TransportErrorIsNotLame` (unreachable NS classified
+as "unknown" → 0 findings, regression guard for the false-positive risk),
+`TestNS_NoDelegationNoFinding` (no NS records → 0 findings without
+attempting SOA probes), and `TestMatchProviderInList` (the cache-aware
+provider matcher used by the new sub-case). Plus an extended
+`TestTerminalWriter_RendersDetailForEveryVector` case for the partial-lame
+rendering. Full suite green under `-race`, `go vet` clean.
+
+**Why this over CAA issuer-mismatch:** The NS partial-lame case is a clean
+DNS-only signal with a binary verdict (every NS either answered
+authoritatively or did not) and a high-impact CONFIRMED upgrade path
+through the existing provider list. CAA issuer-mismatch reduces to a
+"trust this list of CAs" judgment call that ages badly and produces
+false positives on legitimate private/regional CAs — the opposite signal
+quality. Same disposition as the Rank 20/21/23 second-sub-case picks.
+
+**Schema:** no new fields, no new flags, no new vector constant. The
+existing `Nameservers` field carries the lame nameservers (a subset of
+the delegation in the partial-lame sub-case, all of them in the
+zone-deleted sub-case); the Evidence string distinguishes the sub-cases.
+
+**Complexity:** Low — one detector rewrite (partition instead of
+short-circuit), one new helper (`matchProviderInList`, cache-aware), one
+new resolver test seam (`SetSOANameserverRewriteForTest`), one terminal-
+output arm, six new tests + one extended output test, README updates. No
+new dependency.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -1348,3 +1450,4 @@ extended JSONL guard, README + POST_V01 updates. No new dependency
 | 23 | DMARC `https:` report-URI dangling-host detection ✅ | Low | High (completes DMARC report-URI coverage, same report interception) | No (extends `dmarc`, reuses field + flag) |
 | 24 | SPF DNS-lookup-limit (§4.6.4 `permerror`) detection ✅ | Low | High (completes SPF coverage, spoofable-by-omission via DMARC alignment collapse) | Yes (new field, no flag) |
 | 25 | DNSSEC weak/deprecated algorithm detection (RFC 8624) ✅ | Low-Med | High (completes DNSSEC coverage, forgeable chain of trust) | Yes (new field, no flag) |
+| 26 | NS partial-lame delegation detection (RFC 1912 §2.8) ✅ | Low | High (completes NS coverage, partial-hijack precondition when lame NS sits at a takeoverable provider) | No (2nd sub-case of `ns`, reuses field + flag) |

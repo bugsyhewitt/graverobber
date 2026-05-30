@@ -20,7 +20,7 @@ a recon pipeline.
 | Vector | Signal | Real-world campaign |
 |---|---|---|
 | CNAME | Dangling CNAME → fingerprint match against a known-vulnerable service | The classic takeover; ~60+ services covered |
-| NS    | Delegated DNS hosted zone deleted at the provider, re-claimable | Hazy Hawk (.edu campaign, 2025–2026) |
+| NS    | Delegated DNS hosted zone deleted at the provider (every NS `SERVFAIL`s) and re-claimable, **or** the delegation is partially lame — some NS answer authoritatively, some `SERVFAIL`/`REFUSE` (RFC 1912 §2.8) — and any lame NS hostname belongs to a takeoverable provider, a partial-hijack precondition | Hazy Hawk (.edu campaign, 2025–2026); lame delegations cause intermittent outages and, when the lame NS sits at a re-creatable provider, let an attacker control answers for the fraction of resolver queries that hit it |
 | SPF   | An SPF `include:`/`redirect=`/`a:`/`mx:` directive points at an unregistered, claimable domain, the policy ends in `+all` (Pass — any host may send mail as the domain), **or** the recursed evaluation exceeds the RFC 7208 §4.6.4 ten-lookup cap (`permerror` — SPF hard-fails everywhere) | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day; `+all` = fully spoofable domain; lookup-explosion `permerror` = the same spoofable-by-omission outcome under DMARC alignment |
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
 | DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, **or** publishes an inline RSA key below the RFC 8301 1024-bit floor | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012) |
@@ -254,7 +254,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--csv` | false | CSV output (header + one row per finding) for spreadsheet/ticket triage (mutually exclusive with `--json`/`--sarif`) |
 | `--silent` | false | Results only, suppress progress/banner |
 | `--verbose` | false | Verbose debug logging to stderr |
-| `--no-ns` | false | Skip NS takeover checks |
+| `--no-ns` | false | Skip NS delegation checks (zone-deleted strict-unanimity + partial-lame delegation) |
 | `--no-spf` | false | Skip SPF `include:`/`redirect=`/`a:`/`mx:` dangling, `+all` permissive-policy, and RFC 7208 §4.6.4 DNS-lookup-limit checks |
 | `--no-mx` | false | Skip MX dangling-record checks |
 | `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME + weak inline RSA key) |

@@ -110,7 +110,15 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		}
 	case finding.VectorNS:
 		if len(f.Nameservers) > 0 {
-			detail = fmt.Sprintf("ns %v", f.Nameservers)
+			// Distinguish the partial-lame sub-case (some NS authoritative,
+			// some lame) from the zone-deleted strict-unanimity sub-case so
+			// the default terminal output is unambiguous; the Evidence string
+			// is the authoritative discriminator.
+			if strings.Contains(f.Evidence, "partial lame delegation") {
+				detail = fmt.Sprintf("ns partial-lame %v", f.Nameservers)
+			} else {
+				detail = fmt.Sprintf("ns %v", f.Nameservers)
+			}
 		}
 	case finding.VectorMX:
 		if len(f.MXHosts) > 0 {
