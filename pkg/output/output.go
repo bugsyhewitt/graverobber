@@ -130,6 +130,8 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		switch {
 		case f.DKIMKeyBits > 0:
 			detail = fmt.Sprintf("dkim %s._domainkey weak %d-bit RSA key", f.DKIMSelector, f.DKIMKeyBits)
+		case f.DKIMStaleYear > 0:
+			detail = fmt.Sprintf("dkim %s._domainkey stale (year %d in name, unrotated)", f.DKIMSelector, f.DKIMStaleYear)
 		case f.DKIMSelector != "":
 			detail = fmt.Sprintf("dkim %s._domainkey -> %s", f.DKIMSelector, f.CNAME)
 		}

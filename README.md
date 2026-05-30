@@ -23,7 +23,7 @@ a recon pipeline.
 | NS    | Delegated DNS hosted zone deleted at the provider (every NS `SERVFAIL`s) and re-claimable, **or** the delegation is partially lame — some NS answer authoritatively, some `SERVFAIL`/`REFUSE` (RFC 1912 §2.8) — and any lame NS hostname belongs to a takeoverable provider, a partial-hijack precondition | Hazy Hawk (.edu campaign, 2025–2026); lame delegations cause intermittent outages and, when the lame NS sits at a re-creatable provider, let an attacker control answers for the fraction of resolver queries that hit it |
 | SPF   | An SPF `include:`/`redirect=`/`a:`/`mx:` directive points at an unregistered, claimable domain, the policy ends in `+all` (Pass — any host may send mail as the domain), the recursed evaluation exceeds the RFC 7208 §4.6.4 ten-lookup cap (`permerror` — SPF hard-fails everywhere), **or** the apex record contains a `ptr` mechanism (RFC 7208 §5.5 deprecated — SHOULD NOT be published; ignored or `permerror` on many receivers) | SubdoMailing (Guardio Labs, 2024) — 5M phishing emails/day; `+all` = fully spoofable domain; lookup-explosion `permerror` = the same spoofable-by-omission outcome under DMARC alignment; deprecated `ptr` = SPF result effectively undefined on conforming receivers |
 | MX    | A mail-exchanger host is NXDOMAIN or a deleted cloud-mail zone, re-claimable | SubdoMailing / Hazy Hawk inbound-mail hijack |
-| DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, **or** publishes an inline RSA key below the RFC 8301 1024-bit floor | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012) |
+| DKIM  | A `<selector>._domainkey` CNAME delegates to an NXDOMAIN ESP resource, publishes an inline RSA key below the RFC 8301 1024-bit floor, **or** is named with an embedded 4-digit year ≥ 2 calendar years old (rotation-hint — the published key has not been rotated against the M3AAWG / NIST SP 800-177 annual-rotation guidance, so any past compromise stays exploitable) | SubdoMailing DKIM-signing abuse (Guardio Labs, 2024); 512-bit DKIM key factoring (Harris, 2012); selectors like `dkim2019`, `mar2018`, `key2017` still serving live keys (operator surveys, ongoing) |
 | DMARC | A `_dmarc` policy is monitor-only (`p=none`, spoofable) **or** its `rua=`/`ruf=` report host — a `mailto:` domain or `https:` collector host — is NXDOMAIN and re-claimable | Hazy Hawk / SubdoMailing report-interception recon; `p=none` spoofing (BEC/phishing precondition) |
 | AXFR  | A delegated nameserver allows an unauthenticated zone transfer, leaking every record | Classic DNS misconfiguration; force-multiplier for every other vector |
 | CAA   | A `CAA` record names a CA domain that is NXDOMAIN and re-claimable, an `iodef` report host that is NXDOMAIN, **or** uses the `*` wildcard authorising any CA to issue | Missing/weak certificate-issuance control → man-in-the-middle TLS; or CAA report interception |
@@ -257,7 +257,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-ns` | false | Skip NS delegation checks (zone-deleted strict-unanimity + partial-lame delegation) |
 | `--no-spf` | false | Skip SPF `include:`/`redirect=`/`a:`/`mx:` dangling, `+all` permissive-policy, RFC 7208 §4.6.4 DNS-lookup-limit, and RFC 7208 §5.5 deprecated-`ptr`-mechanism checks |
 | `--no-mx` | false | Skip MX dangling-record checks |
-| `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME + weak inline RSA key) |
+| `--no-dkim` | false | Skip DKIM selector checks (dangling CNAME, weak inline RSA key, stale-year rotation-hint) |
 | `--no-dmarc` | false | Skip DMARC report-host dangling + `p=none` checks |
 | `--no-axfr` | false | Skip AXFR zone-transfer misconfiguration checks |
 | `--no-caa` | false | Skip CAA (Certification Authority Authorization) misconfiguration checks (dangling issuer, dangling `iodef` report host, permissive any-CA) |
@@ -420,7 +420,7 @@ list of common ESP selectors by default (`default`, `google`, `k1`, `k2`, `s1`,
 `s2`, `selector1`, `selector2`, `dkim`, `mail`, `smtp`). Override the list with
 `--selectors` (comma-separated) when you know the selector in use.
 
-The DKIM vector checks two distinct weaknesses per selector:
+The DKIM vector checks three distinct weaknesses per selector:
 
 - **Dangling delegation (`CONFIRMED`).** If the selector is published as a CNAME
   whose target is `NXDOMAIN`, the ESP resource is gone and reclaimable — an
@@ -435,6 +435,23 @@ The DKIM vector checks two distinct weaknesses per selector:
   finding carries `dkim_key_bits` with the offending size. Keys that meet the
   floor, non-RSA keys, and explicitly-revoked keys (empty `p=`) are never
   flagged.
+- **Stale rotation-hint (`POTENTIAL`).** When the selector name embeds a 4-digit
+  year that is at least **two calendar years** older than the current year —
+  e.g. `dkim2019`, `mar2019`, `key2018`, `selector-2017` — and the selector
+  still publishes a live key (inline TXT or live CNAME delegation), graverobber
+  emits a `POTENTIAL` rotation-hint finding carrying the extracted year in
+  `dkim_stale_year`. Operators rotate DKIM by spinning up a new selector named
+  for the rotation date and re-pointing the signer; a multi-year-old selector
+  still serving a live key is a strong signal the rotation never happened.
+  [M3AAWG Sender Best Common Practices §6](https://www.m3aawg.org/sites/default/files/m3aawg-senders-bcp-ver3-2015-02.pdf)
+  and [NIST SP 800-177r1 §4.5.2](https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-177r1.pdf)
+  both recommend annual DKIM key rotation; a key still live under a stale-named
+  selector keeps any past compromise exploitable indefinitely. The check uses a
+  boundary regex that skips long numeric runs (vendor account ids like
+  `u20191234`), only matches years from `2000` onward (DKIM was published as
+  RFC 4871 in 2007), and never fires on a `NXDOMAIN` selector — the dangling
+  sub-case takes precedence because a non-existent selector has no key to call
+  stale.
 
 ### DMARC policy weakness & report-host takeover (`--no-dmarc`)
 
@@ -804,6 +821,7 @@ JSONL — one finding per line:
 ```json
 {"subdomain":"dev.example.com","vector":"cname","service":"AWS/S3","confidence":"CONFIRMED","cname":"example.s3.amazonaws.com","fingerprint":"The specified bucket does not exist","scheme":"https","timestamp":"2026-05-16T12:34:56Z"}
 {"subdomain":"s1._domainkey.example.com","vector":"dkim","confidence":"LIKELY","dkim_selector":"s1","dkim_key_bits":512,"evidence":"DKIM selector publishes a 512-bit RSA key (below the RFC 8301 1024-bit floor) — factorable, forgeable signatures","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"dkim2019._domainkey.example.com","vector":"dkim","confidence":"POTENTIAL","dkim_selector":"dkim2019","dkim_stale_year":2019,"evidence":"DKIM selector name embeds the year 2019 (2+ years stale) — published key has not been rotated against the M3AAWG / NIST SP 800-177 annual-rotation guidance; a past key compromise stays exploitable","timestamp":"2026-05-29T12:00:00Z"}
 {"subdomain":"reports.deleted-vendor.net","vector":"dmarc","confidence":"POTENTIAL","dmarc_uri":"reports.deleted-vendor.net","evidence":"DMARC rua/ruf report host is NXDOMAIN (claimable — report interception)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"dmarc","confidence":"POTENTIAL","dmarc_policy":"none","evidence":"DMARC policy is p=none with no rua= aggregate reporting (no enforcement and no visibility)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"spoofable.example.com","vector":"spf","confidence":"POTENTIAL","spf_all":"+all","evidence":"SPF policy ends in +all (Pass — authorises any host to send mail as the domain; domain is spoofable)","timestamp":"2026-05-28T12:00:00Z"}
@@ -823,8 +841,8 @@ and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
 `include:`/`redirect=` domain, the permissive `+all` mechanism, or the
 DNS-lookup count when it exceeds the RFC 7208 §4.6.4 cap of ten (`spf`), the
 failed nameservers (`ns`), the dangling
-mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation or
-weak inline RSA key size (`dkim`), the claimable `rua`/`ruf` report host
+mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation,
+weak inline RSA key size, or stale-year rotation-hint (`dkim`), the claimable `rua`/`ruf` report host
 (`dmarc`), the leaking
 nameserver and leaked-host count (`axfr`), the orphaned `DS` key tags
 (`dnssec`), or the dangling TLSRPT report host (`tlsrpt`). ANSI colour is emitted only to a TTY;
