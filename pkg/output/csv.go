@@ -128,6 +128,9 @@ func csvTarget(f finding.Finding) string {
 		if f.DKIMKeyBits > 0 {
 			return fmt.Sprintf("%s._domainkey (%d-bit RSA key)", f.DKIMSelector, f.DKIMKeyBits)
 		}
+		if f.DKIMStaleYear > 0 {
+			return fmt.Sprintf("%s._domainkey (stale year %d)", f.DKIMSelector, f.DKIMStaleYear)
+		}
 		if f.DKIMSelector != "" {
 			return fmt.Sprintf("%s._domainkey -> %s", f.DKIMSelector, f.CNAME)
 		}

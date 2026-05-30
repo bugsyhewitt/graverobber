@@ -139,8 +139,8 @@ var vectorRuleText = map[finding.Vector]struct {
 	},
 	finding.VectorDKIM: {
 		"DKIM selector weakness",
-		"A DKIM selector is reclaimable (dangling CNAME) or publishes a weak RSA key.",
-		"A DKIM selector is either published as a CNAME whose target is NXDOMAIN (an attacker who reclaims the ESP resource can serve a DKIM key that signs spoofed mail) or publishes an inline RSA key below the RFC 8301 1024-bit floor (an attacker who factors the short key can forge DKIM-passing signatures directly). Either way the attacker can sign mail that passes DKIM for the domain.",
+		"A DKIM selector is reclaimable (dangling CNAME), publishes a weak RSA key, or carries a stale-year rotation-hint name.",
+		"A DKIM selector is either published as a CNAME whose target is NXDOMAIN (an attacker who reclaims the ESP resource can serve a DKIM key that signs spoofed mail), publishes an inline RSA key below the RFC 8301 1024-bit floor (an attacker who factors the short key can forge DKIM-passing signatures directly), or is named with an embedded 4-digit year at least two calendar years old (the selector still publishes a live key under a stale-year name, indicating the key was never rotated against the M3AAWG / NIST SP 800-177 annual-rotation guidance; any past compromise of that key remains exploitable). Either way the attacker can — or already can — sign mail that passes DKIM for the domain.",
 	},
 	finding.VectorDMARC: {
 		"DMARC policy weakness or dangling report host",
@@ -282,6 +282,8 @@ func sarifMessage(f finding.Finding) string {
 		switch {
 		case f.DKIMKeyBits > 0:
 			detail = fmt.Sprintf("DKIM %s._domainkey weak %d-bit RSA key", f.DKIMSelector, f.DKIMKeyBits)
+		case f.DKIMStaleYear > 0:
+			detail = fmt.Sprintf("DKIM %s._domainkey stale (selector embeds year %d)", f.DKIMSelector, f.DKIMStaleYear)
 		case f.DKIMSelector != "":
 			detail = fmt.Sprintf("DKIM %s._domainkey -> %s", f.DKIMSelector, f.CNAME)
 		}

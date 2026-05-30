@@ -41,11 +41,14 @@ const (
 	// VectorDKIM: a DKIM selector (<selector>._domainkey.<domain>) is either
 	// published as a CNAME whose target is NXDOMAIN (the ESP resource is gone
 	// and an attacker who reclaims it can serve a DKIM key that signs spoofed
-	// mail), or published inline with an RSA public key whose modulus is below
+	// mail), published inline with an RSA public key whose modulus is below
 	// the RFC 8301 1024-bit floor (an attacker who factors the short key can
-	// forge DKIM signatures directly). The DKIMKeyBits field distinguishes the
-	// two cases: zero for the dangling-CNAME case, the modulus size for a weak
-	// inline key.
+	// forge DKIM signatures directly), or named with an embedded year that is
+	// stale (>= 2 years older than the current year) — a rotation-hint signal
+	// that the published key has not been rotated for years, compounding
+	// key-compromise risk against the M3AAWG / NIST SP 800-177 annual-rotation
+	// recommendation. The DKIMKeyBits / DKIMStaleYear fields distinguish the
+	// sub-cases.
 	VectorDKIM Vector = "dkim"
 	// VectorDMARC: a DMARC policy at _dmarc.<domain> is either weak or dangling.
 	// In the dangling sub-case a rua=/ruf= report URI points at an NXDOMAIN host —
@@ -258,6 +261,17 @@ type Finding struct {
 	// the RFC 8301 1024-bit floor. It is zero (omitted) for the dangling-CNAME
 	// sub-case, which is identified instead by the CNAME field.
 	DKIMKeyBits int `json:"dkim_key_bits,omitempty"`
+	// DKIMStaleYear is set for the rotation-hint VectorDKIM sub-case: the
+	// 4-digit year graverobber extracted from the selector name (e.g. 2019 for
+	// a selector "dkim2019" or "mar2019") when that year is at least
+	// staleSelectorYearGap years older than the current year. It is a strong
+	// hint that the published key has not been rotated since that year and is
+	// stale against the M3AAWG sender BCP / NIST SP 800-177 annual DKIM
+	// rotation recommendation; a multi-year-old key compounds any past
+	// compromise into a still-live forgery surface. The field is zero
+	// (omitted) for every other sub-case, which are distinguished by CNAME
+	// (dangling delegation) or DKIMKeyBits (weak inline key).
+	DKIMStaleYear int `json:"dkim_stale_year,omitempty"`
 	// DMARCURI is set for the dangling-report-host VectorDMARC sub-case: the
 	// claimable rua/ruf report host — a mailto: address domain (the part after
 	// "mailto:...@") or an https: collector host (the URL authority).

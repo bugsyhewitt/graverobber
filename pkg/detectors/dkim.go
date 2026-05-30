@@ -7,7 +7,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bugsyhewitt/graverobber/pkg/finding"
 	"github.com/bugsyhewitt/graverobber/pkg/resolver"
@@ -24,6 +27,43 @@ import (
 // touching DNS, so it is a real, exploitable spoofing weakness independent of
 // the dangling-CNAME case.
 const minDKIMKeyBits = 1024
+
+// staleSelectorYearGap is the minimum age (in whole years, current year minus
+// the year embedded in the selector name) at which a published DKIM key is
+// reported as a rotation-hint finding. Operators rotate DKIM keys by spinning
+// up a new selector containing the rotation date (e.g. "dkim2024",
+// "mar2024", "key2024") and pointing mail flow at it; a selector still
+// publishing a key two-plus calendar years later is a strong signal that the
+// rotation never happened. The threshold is conservative — one year of lag is
+// common during a controlled overlap window — but two years exceeds every
+// mainstream rotation guidance (M3AAWG Sender Best Common Practices §6,
+// NIST SP 800-177r1 §4.5.2, RFC 6376 §3.6.1) and is unambiguously stale.
+const staleSelectorYearGap = 2
+
+// selectorYearLow and selectorYearHigh bracket the range of 4-digit substrings
+// graverobber treats as a candidate "year embedded in the selector name".
+// DKIM was published as RFC 4871 in May 2007; selectors carrying a year before
+// 2000 are overwhelmingly false positives (random version numbers, ticket IDs,
+// vendor account numbers like "u123" / "u4567"). The upper bound prevents a
+// far-future year from being treated as stale during a clock-skew window.
+const (
+	selectorYearLow  = 2000
+	selectorYearHigh = 2100
+)
+
+// selectorYearRE captures the first 4-digit substring in a DKIM selector name
+// that is not adjacent to another digit on either side — so it matches the
+// "2019" in "dkim2019", "mar2019", "2019-key", or "key-2019-rot", but not the
+// embedded "2019" in "u20191234" (a vendor account number) or "1234567" (a
+// long opaque selector). The non-digit boundary (or string edge) on each side
+// is what filters out the long-numeric vendor selectors that would otherwise
+// dominate the false-positive surface.
+var selectorYearRE = regexp.MustCompile(`(?:^|[^0-9])([0-9]{4})(?:[^0-9]|$)`)
+
+// nowFn is the clock used to compute the current year for the rotation-hint
+// check. It is var so tests can pin a deterministic "now" without depending on
+// the real calendar (the staleness threshold rolls forward each January).
+var nowFn = func() time.Time { return time.Now().UTC() }
 
 // DefaultDKIMSelectors is the list of DKIM selectors graverobber probes when no
 // override is supplied. DKIM public keys live at <selector>._domainkey.<domain>;
@@ -101,6 +141,15 @@ func DKIM(ctx context.Context, target string, r *resolver.Resolver, selectors []
 					DKIMSelector: sel,
 					Evidence:     "DKIM selector CNAME target is NXDOMAIN — ESP resource reclaimable",
 				})
+				continue
+			}
+			// Live CNAME delegation — the selector still publishes a key via the
+			// ESP. A stale-year selector name here is a rotation-hint signal:
+			// the published key has been live under the same selector across
+			// the entire stale window. Fire the rotation-hint check, then move
+			// on (no inline-key check applies to a CNAME-delegated selector).
+			if year, stale := staleSelectorYear(sel, nowFn()); stale {
+				findings = append(findings, staleDKIMFinding(host, sel, year))
 			}
 			continue
 		}
@@ -112,20 +161,26 @@ func DKIM(ctx context.Context, target string, r *resolver.Resolver, selectors []
 		if txtErr != nil || len(txts) == 0 {
 			continue
 		}
-		bits, ok := weakDKIMKeyBits(txts)
-		if !ok {
+		if !isDKIMKeyRecord(txts) {
 			continue
 		}
-		findings = append(findings, finding.Finding{
-			Subdomain:    host,
-			Vector:       finding.VectorDKIM,
-			Confidence:   finding.Likely,
-			DKIMSelector: sel,
-			DKIMKeyBits:  bits,
-			Evidence: fmt.Sprintf(
-				"DKIM selector publishes a %d-bit RSA key (below the RFC 8301 %d-bit floor) — factorable, forgeable signatures",
-				bits, minDKIMKeyBits),
-		})
+		if bits, ok := weakDKIMKeyBits(txts); ok {
+			findings = append(findings, finding.Finding{
+				Subdomain:    host,
+				Vector:       finding.VectorDKIM,
+				Confidence:   finding.Likely,
+				DKIMSelector: sel,
+				DKIMKeyBits:  bits,
+				Evidence: fmt.Sprintf(
+					"DKIM selector publishes a %d-bit RSA key (below the RFC 8301 %d-bit floor) — factorable, forgeable signatures",
+					bits, minDKIMKeyBits),
+			})
+		}
+		// Rotation-hint fires independently of weak-key: a healthy 2048-bit
+		// key under a stale-named selector is still a stale key.
+		if year, stale := staleSelectorYear(sel, nowFn()); stale {
+			findings = append(findings, staleDKIMFinding(host, sel, year))
+		}
 	}
 
 	return findings, nil
@@ -233,4 +288,65 @@ func rsaPublicKeyBits(p string) (int, bool) {
 	}
 
 	return 0, false
+}
+
+// isDKIMKeyRecord reports whether any TXT value at the selector looks like a
+// DKIM key record (carries a p= tag and, if v= is present, says DKIM1). It is
+// the gate the rotation-hint and weak-key checks share so an unrelated TXT
+// record (a domain-verification token, an SPF macro stash) at the same name
+// does not trigger a DKIM finding.
+func isDKIMKeyRecord(txts []string) bool {
+	for _, txt := range txts {
+		tags := parseDKIMTags(txt)
+		if _, hasP := tags["p"]; !hasP {
+			continue
+		}
+		if v, hasV := tags["v"]; hasV && !strings.EqualFold(v, "DKIM1") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// staleSelectorYear extracts a 4-digit year embedded in a DKIM selector name
+// and reports it when the gap between that year and now is at least
+// staleSelectorYearGap whole calendar years. The boundary regex skips long
+// numeric runs (vendor account ids like u20191234) so only standalone years
+// match. Only the first match in the selector is considered — selector names
+// rarely encode more than one date, and a deterministic single-result rule
+// keeps the finding's evidence string unambiguous.
+func staleSelectorYear(selector string, now time.Time) (int, bool) {
+	m := selectorYearRE.FindStringSubmatch(selector)
+	if len(m) < 2 {
+		return 0, false
+	}
+	year, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	if year < selectorYearLow || year > selectorYearHigh {
+		return 0, false
+	}
+	if now.Year()-year < staleSelectorYearGap {
+		return 0, false
+	}
+	return year, true
+}
+
+// staleDKIMFinding constructs the rotation-hint VectorDKIM finding. Confidence
+// is Potential — the staleness is a strong hint, not a cryptographic proof of
+// weakness on its own (the key may still be modern-strength), so it sits in
+// the same tier as the SPF / DMARC / CAA misconfiguration findings.
+func staleDKIMFinding(host, sel string, year int) finding.Finding {
+	return finding.Finding{
+		Subdomain:     host,
+		Vector:        finding.VectorDKIM,
+		Confidence:    finding.Potential,
+		DKIMSelector:  sel,
+		DKIMStaleYear: year,
+		Evidence: fmt.Sprintf(
+			"DKIM selector name embeds the year %d (%d+ years stale) — published key has not been rotated against the M3AAWG / NIST SP 800-177 annual-rotation guidance; a past key compromise stays exploitable",
+			year, staleSelectorYearGap),
+	}
 }
