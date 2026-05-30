@@ -151,7 +151,11 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 	case finding.VectorBIMI:
 		detail = fmt.Sprintf("bimi asset host %s NXDOMAIN (dangling brand logo/VMC)", f.BIMIURIHost)
 	case finding.VectorDNSSEC:
-		detail = fmt.Sprintf("dnssec orphaned DS %s (parent DS, no child DNSKEY — SERVFAIL outage)", formatKeyTags(f.DSKeyTags))
+		if len(f.DNSSECWeakAlgs) > 0 {
+			detail = fmt.Sprintf("dnssec weak algorithm(s) %s (RFC 8624 deprecated — forgeable chain)", strings.Join(f.DNSSECWeakAlgs, ", "))
+		} else {
+			detail = fmt.Sprintf("dnssec orphaned DS %s (parent DS, no child DNSKEY — SERVFAIL outage)", formatKeyTags(f.DSKeyTags))
+		}
 	case finding.VectorTLSRPT:
 		detail = fmt.Sprintf("tlsrpt report host %s NXDOMAIN (dangling — TLS-report interception)", f.TLSRPTURIHost)
 	}

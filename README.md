@@ -30,7 +30,7 @@ a recon pipeline.
 | TLSA  | A DANE `TLSA` pin at `_25._tcp.<mxhost>` covers an MX host that is NXDOMAIN — a dangling, DNSSEC-authenticated pin | Hard-fails inbound mail from DANE senders; reclaimable mail host → DANE-trusted interception (RFC 7672) |
 | MTA-STS | An MTA-STS policy is advertised (`v=STSv1` TXT at `_mta-sts.<domain>`) but the policy host `mta-sts.<domain>` is NXDOMAIN and re-claimable | Reclaimed policy host serves a forged policy (`mode: none` disables TLS enforcement, or an attacker `mx:` list redirects mail) → TLS downgrade / mail interception (RFC 8461) |
 | BIMI | A BIMI record (`v=BIMI1` TXT at `default._bimi.<domain>`) names a logo (`l=`) or VMC (`a=`) URL whose host is NXDOMAIN and re-claimable | Reclaimed asset host serves a forged brand logo/VMC, displayed beside DMARC-passing mail → brand-impersonation phishing (BIMI spec) |
-| DNSSEC | The parent zone publishes a `DS` (Delegation Signer) record but the domain has **no `DNSKEY`** — an orphaned DS that breaks the chain of trust | Every validating resolver (Google, Cloudflare, Quad9, most ISPs) `SERVFAIL`s the whole zone → self-inflicted outage; common after disabling DNSSEC or migrating DNS providers without removing the DS (RFC 4034) |
+| DNSSEC | The parent zone publishes a `DS` (Delegation Signer) record but the domain has **no `DNSKEY`** — an orphaned DS that breaks the chain of trust; **or** the chain is intact but uses a DNSSEC algorithm RFC 8624 forbids/deprecates (RSAMD5, DSA/SHA-1, RSASHA1, DSA-NSEC3-SHA1, RSASHA1-NSEC3-SHA1, ECC-GOST, or a SHA-1 DS digest) — a forgeable chain | Orphan: every validating resolver (Google, Cloudflare, Quad9, most ISPs) `SERVFAIL`s the whole zone → self-inflicted outage. Weak algorithm: a well-resourced attacker can forge a valid-looking DNSSEC chain, defeating DNSSEC entirely (RFC 4034, RFC 8624) |
 | TLSRPT | A TLSRPT record (`v=TLSRPTv1` TXT at `_smtp._tls.<domain>`) names a `rua=` report destination — a `mailto:` domain or `https:` collector host — that is NXDOMAIN and re-claimable | Reclaimed destination intercepts every SMTP-TLS failure report → delivery reconnaissance and a live view of the downgrade failures that would otherwise alert the owner (RFC 8460) |
 
 Most scanners cover CNAME only. NS, SPF, MX, DKIM, and DMARC takeover are live,
@@ -264,7 +264,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-tlsa` | false | Skip TLSA dangling-DANE-pin checks |
 | `--no-mtasts` | false | Skip MTA-STS dangling-policy-host checks |
 | `--no-bimi` | false | Skip BIMI dangling-asset-host checks |
-| `--no-dnssec` | false | Skip DNSSEC orphaned-DS (broken chain-of-trust) checks |
+| `--no-dnssec` | false | Skip DNSSEC checks (orphaned DS, weak/deprecated algorithm per RFC 8624) |
 | `--no-tlsrpt` | false | Skip TLSRPT dangling-report-destination checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
@@ -633,7 +633,14 @@ asset hosts all resolve, is the healthy case and is intentionally **not** flagge
 The `a=self` and empty-value forms name no remote host and are likewise never
 flagged — only an advertised-but-orphaned asset host is reported.
 
-### Orphaned DNSSEC DS record (`--no-dnssec`)
+### Broken or cryptographically weak DNSSEC delegation (`--no-dnssec`)
+
+The DNSSEC vector reports two distinct delegation failures. The first is an
+**orphaned DS** (an availability failure: the chain is missing a link); the
+second is a **weak DNSSEC algorithm** (a confidentiality/integrity failure: the
+chain is present but its cryptography is broken).
+
+#### Orphaned DS — broken chain of trust
 
 DNSSEC secures a delegation with two halves: the child zone signs its records and
 publishes a `DNSKEY`, and the **parent** zone publishes a `DS` (Delegation Signer)
@@ -677,6 +684,43 @@ precisely because the chain is already broken** — is reported as a `POTENTIAL`
 `dnssec` finding keyed on the target, carrying the orphaned `DS` key tags in
 `ds_key_tags` so you know exactly which registrar records to remove (or re-sign
 the zone to match).
+
+#### Weak / deprecated DNSSEC algorithm — forgeable chain
+
+A DNSSEC delegation can be intact but cryptographically rotten. The IANA DNS
+Security Algorithm Numbers registry contains algorithms RFC 8624 §3.1 forbids
+(`MUST NOT` use) or deprecates (`NOT RECOMMENDED`) for signing — they are
+broken or obsolete enough that a well-resourced attacker can forge a valid-
+looking chain of trust:
+
+| Alg # | Name                | RFC 8624 disposition          |
+|-------|---------------------|-------------------------------|
+| 1     | RSAMD5              | MUST NOT (MD5 collision-broken) |
+| 3     | DSA/SHA-1           | MUST NOT                       |
+| 5     | RSASHA1             | NOT RECOMMENDED (SHA-1 collision-broken) |
+| 6     | DSA-NSEC3-SHA1      | MUST NOT                       |
+| 7     | RSASHA1-NSEC3-SHA1  | NOT RECOMMENDED                |
+| 12    | ECC-GOST            | MUST NOT (GOST R 34.10-2001 deprecated) |
+
+The same applies to the DS record's **digest type**: digest type 1 (SHA-1, RFC
+8624 §3.3 `NOT RECOMMENDED`) cannot rule out a substituted child key whose
+SHA-1 digest collides with the published DS — so a SHA-1 DS is flagged even
+when the key algorithm it references is modern.
+
+When the chain is healthy (DS present + DNSKEY present) graverobber inspects
+both surfaces — every child DNSKEY's algorithm and every parent DS's
+(algorithm, digest type) pair — and emits a `POTENTIAL` `dnssec` finding
+listing every distinct weakness observed in `dnssec_weak_algs` (deduplicated
+and sorted). Modern algorithms (RSASHA256, RSASHA512, ECDSA P-256/P-384,
+Ed25519, Ed448) and modern digest types (SHA-256, SHA-384) are the secure
+norm and are not flagged. Rotate to one of those and update the DS at the
+registrar to repair the finding.
+
+The orphan and weak-algorithm sub-cases are distinguished in the output by
+which of `ds_key_tags` / `dnssec_weak_algs` is set — both fields are present
+on the weak-algorithm finding (the DS tags ride along so an operator can map
+the weakness back to the specific registrar records), but `dnssec_weak_algs`
+is empty on the orphan.
 
 ### Dangling TLSRPT report destination (`--no-tlsrpt`)
 
@@ -750,6 +794,7 @@ JSONL — one finding per line:
 {"subdomain":"example.com","vector":"mtasts","service":"mta-sts.example.com","confidence":"POTENTIAL","cname":"policy.deleted-vendor.invalid","evidence":"MTA-STS policy advertised at _mta-sts.example.com but policy host mta-sts.example.com is NXDOMAIN (dangling MTA-STS host — reclaimable to serve a forged policy that disables TLS enforcement or redirects mail)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"bimi","service":"default._bimi.example.com","confidence":"POTENTIAL","bimi_uri_host":"images.deleted-vendor.invalid","evidence":"BIMI record at default._bimi.example.com l= asset host images.deleted-vendor.invalid is NXDOMAIN (dangling BIMI asset host — reclaimable to serve a forged brand logo/VMC beside DMARC-passing mail)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"dnssec","confidence":"POTENTIAL","ds_key_tags":[12345],"evidence":"parent zone publishes DS record(s) (key tag(s) 12345) but example.com has no DNSKEY — orphaned DS: DNSSEC-validating resolvers (Google, Cloudflare, Quad9, most ISPs) return SERVFAIL for the whole zone (self-inflicted outage; remove the DS at the registrar or re-sign the zone)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"weak-dnssec.example.com","vector":"dnssec","confidence":"POTENTIAL","ds_key_tags":[12345],"dnssec_weak_algs":["RSASHA1"],"evidence":"DNSSEC delegation uses weak/deprecated algorithm(s) RSASHA1 (RFC 8624) — forgeable chain of trust; rotate to RSASHA256/RSASHA512/ECDSAP256SHA256/ECDSAP384SHA384/ED25519 and update the DS at the registrar","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"tlsrpt","service":"_smtp._tls.example.com","confidence":"POTENTIAL","tlsrpt_uri_host":"reports.deleted-vendor.invalid","evidence":"TLSRPT record at _smtp._tls.example.com rua= report destination host reports.deleted-vendor.invalid is NXDOMAIN (dangling SMTP-TLS report destination — reclaimable to intercept TLS failure reports and mask an active TLS-downgrade attack)","timestamp":"2026-05-28T12:00:00Z"}
 ```
 

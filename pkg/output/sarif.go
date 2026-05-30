@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/bugsyhewitt/graverobber/pkg/finding"
@@ -172,9 +173,9 @@ var vectorRuleText = map[finding.Vector]struct {
 		"A domain advertises BIMI (Brand Indicators for Message Identification) via a \"v=BIMI1\" TXT record whose l= (logo) or a= (VMC certificate) URL points at a host that is NXDOMAIN. BIMI-aware mail clients display the logo beside DMARC-passing mail from the domain as a visual mark of authenticity; an attacker who reclaims the dangling asset host can serve a forged brand logo (and, where the VMC host is the reclaimed one, a forged VMC), lending a spoofing campaign the exact trust signal BIMI exists to confer — a brand-impersonation surface.",
 	},
 	finding.VectorDNSSEC: {
-		"Orphaned DNSSEC DS record (broken chain of trust)",
-		"The parent zone publishes a DS record but the domain has no DNSKEY.",
-		"The domain's parent zone publishes a DS (Delegation Signer, RFC 4034) record — committing every DNSSEC-validating resolver to build an authenticated chain of trust into the domain's zone — but the domain itself publishes no DNSKEY, so the chain cannot be completed. DNSSEC validation fails closed: every validating resolver (the default at Google Public DNS, Cloudflare 1.1.1.1, Quad9, and most ISPs) returns SERVFAIL for the entire zone, taking the domain and all its services (web, mail, APIs) offline for a large fraction of the internet while it resolves normally on non-validating resolvers. It is typically caused by disabling DNSSEC at the child or migrating DNS providers without first removing the DS at the registrar — a self-inflicted denial of service repaired by removing the orphaned DS or re-signing the zone.",
+		"Broken or cryptographically weak DNSSEC delegation",
+		"DNSSEC delegation is orphaned (DS but no DNSKEY) or uses a deprecated algorithm (RFC 8624).",
+		"The domain's DNSSEC delegation is broken in one of two ways. In the orphaned-DS sub-case the parent zone publishes a DS (Delegation Signer, RFC 4034) record — committing every DNSSEC-validating resolver to build an authenticated chain of trust into the domain's zone — but the domain itself publishes no DNSKEY, so the chain cannot be completed; validation fails closed and every validating resolver (the default at Google Public DNS, Cloudflare 1.1.1.1, Quad9, and most ISPs) returns SERVFAIL for the entire zone, taking the domain and all its services offline for a large fraction of the internet — a self-inflicted denial of service. In the weak-algorithm sub-case the chain is intact but at least one DNSKEY or DS uses an algorithm RFC 8624 forbids (\"MUST NOT\") or deprecates (\"NOT RECOMMENDED\") — RSAMD5 (1), DSA/SHA-1 (3), RSASHA1 (5), DSA-NSEC3-SHA1 (6), RSASHA1-NSEC3-SHA1 (7), ECC-GOST (12), or a DS digest type of SHA-1 (1) — and the cryptography is broken or deprecated enough that a well-resourced attacker can forge a valid-looking chain, defeating the protection DNSSEC exists to provide. Repaired by removing the orphaned DS (or re-signing the zone) for the first sub-case, or rotating to RSASHA256/RSASHA512/ECDSA P-256/P-384/Ed25519 for the second.",
 	},
 	finding.VectorTLSRPT: {
 		"Dangling TLSRPT report destination",
@@ -310,7 +311,11 @@ func sarifMessage(f finding.Finding) string {
 	case finding.VectorBIMI:
 		detail = fmt.Sprintf("BIMI asset host %s is NXDOMAIN (dangling — reclaimable to serve a forged brand logo/VMC)", f.BIMIURIHost)
 	case finding.VectorDNSSEC:
-		detail = fmt.Sprintf("orphaned DS (%s) at the parent with no DNSKEY in %s — DNSSEC chain broken, validating resolvers SERVFAIL the whole zone", formatKeyTags(f.DSKeyTags), f.Subdomain)
+		if len(f.DNSSECWeakAlgs) > 0 {
+			detail = fmt.Sprintf("DNSSEC delegation for %s uses weak/deprecated algorithm(s) %s (RFC 8624) — forgeable chain of trust", f.Subdomain, strings.Join(f.DNSSECWeakAlgs, ", "))
+		} else {
+			detail = fmt.Sprintf("orphaned DS (%s) at the parent with no DNSKEY in %s — DNSSEC chain broken, validating resolvers SERVFAIL the whole zone", formatKeyTags(f.DSKeyTags), f.Subdomain)
+		}
 	case finding.VectorTLSRPT:
 		detail = fmt.Sprintf("TLSRPT report destination %s is NXDOMAIN (dangling — reclaimable to intercept SMTP-TLS failure reports)", f.TLSRPTURIHost)
 	}

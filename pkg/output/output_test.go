@@ -64,7 +64,7 @@ func TestJSONLWriter_OmitsEmptyVectorFields(t *testing.T) {
 	})
 
 	got := buf.String()
-	for _, leaked := range []string{"mx_hosts", "dkim_selector", "dmarc_uri", "spf_include", "spf_lookups", "nameservers"} {
+	for _, leaked := range []string{"mx_hosts", "dkim_selector", "dmarc_uri", "spf_include", "spf_lookups", "nameservers", "dnssec_weak_algs", "ds_key_tags"} {
 		if strings.Contains(got, leaked) {
 			t.Errorf("CNAME finding leaked %q field: %s", leaked, got)
 		}
@@ -205,6 +205,16 @@ func TestTerminalWriter_RendersDetailForEveryVector(t *testing.T) {
 				Confidence: finding.Potential, DSKeyTags: []uint16{12345},
 			},
 			wantSub: []string{"example.com", "12345", "dnssec"},
+		},
+		{
+			name: "dnssec-weak-algorithm",
+			f: finding.Finding{
+				Subdomain: "example.com", Vector: finding.VectorDNSSEC,
+				Confidence:     finding.Potential,
+				DSKeyTags:      []uint16{12345},
+				DNSSECWeakAlgs: []string{"RSASHA1"},
+			},
+			wantSub: []string{"example.com", "RSASHA1", "dnssec", "weak"},
 		},
 		{
 			name: "tlsrpt",

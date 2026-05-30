@@ -170,6 +170,7 @@ func TestSARIF_MessageSurfacesVectorDetail(t *testing.T) {
 		{"axfr", finding.Finding{Subdomain: "example.com", Vector: finding.VectorAXFR, Confidence: finding.Confirmed, Service: "ns1.example.com", Nameservers: []string{"ns1.example.com"}, LeakedHosts: []string{"admin.example.com"}}, "ns1.example.com"},
 		{"bimi", finding.Finding{Subdomain: "example.com", Vector: finding.VectorBIMI, Confidence: finding.Potential, Service: "default._bimi.example.com", BIMIURIHost: "images.gone.net"}, "images.gone.net"},
 		{"dnssec", finding.Finding{Subdomain: "example.com", Vector: finding.VectorDNSSEC, Confidence: finding.Potential, DSKeyTags: []uint16{12345}}, "12345"},
+		{"dnssec-weak-algorithm", finding.Finding{Subdomain: "example.com", Vector: finding.VectorDNSSEC, Confidence: finding.Potential, DSKeyTags: []uint16{12345}, DNSSECWeakAlgs: []string{"RSASHA1"}}, "RSASHA1"},
 		{"tlsrpt", finding.Finding{Subdomain: "example.com", Vector: finding.VectorTLSRPT, Confidence: finding.Potential, Service: "_smtp._tls.example.com", TLSRPTURIHost: "reports.gone.net"}, "reports.gone.net"},
 	}
 	for _, tc := range cases {
