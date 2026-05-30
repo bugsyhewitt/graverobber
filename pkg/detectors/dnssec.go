@@ -74,32 +74,37 @@ func DNSSEC(ctx context.Context, target string, r *resolver.Resolver) ([]finding
 	}
 
 	// 1. Is there a DS at the parent? No DS → insecure delegation, nothing to
-	//    orphan. A lookup error is indeterminate → emit nothing.
-	tags, err := r.DSKeyTags(ctx, target)
-	if err != nil || len(tags) == 0 {
+	//    orphan and no algorithm to weigh. A lookup error is indeterminate → emit
+	//    nothing.
+	dsRecs, err := r.DSAlgorithms(ctx, target)
+	if err != nil || len(dsRecs) == 0 {
 		return nil, nil
 	}
 
-	// 2/3. Does the child publish a DNSKEY?
-	hasKey, keyErr := r.HasDNSKEY(ctx, target)
+	// 2. Does the child publish a DNSKEY? The answer routes to one of the two
+	//    sub-cases: no key → orphan; key(s) present → check algorithms for weak.
+	childAlgs, keyErr := r.DNSKEYAlgorithms(ctx, target)
 	switch {
-	case keyErr == nil && hasKey:
-		// Signed delegation with a key present — healthy, the normal secure case.
-		return nil, nil
-	case keyErr == nil && !hasKey:
+	case keyErr == nil && len(childAlgs) > 0:
+		// Signed delegation with at least one key present. Healthy as far as the
+		// chain goes; now inspect both the DS records and the child DNSKEYs for
+		// algorithms RFC 8624 has retired. Any hit → weak-algorithm finding.
+		return weakAlgorithmFinding(target, dsRecs, childAlgs), nil
+	case keyErr == nil && len(childAlgs) == 0:
 		// DS at the parent, no DNSKEY at the child: the orphan. Fall through.
 	case errors.Is(keyErr, resolver.ErrZoneDeleted):
 		// A validating resolver returned SERVFAIL for the DNSKEY query because the
 		// chain is already broken — this is the orphan presenting itself. Fall
-		// through and emit the finding.
+		// through and emit the orphan finding.
 	default:
 		// Indeterminate (transport failure, unexpected rcode) — emit nothing
 		// rather than risk a false positive.
 		return nil, nil
 	}
 
-	// Stable, deduplicated key-tag evidence so output is deterministic.
-	tags = dedupSortedKeyTags(tags)
+	// Orphan sub-case. Stable, deduplicated key-tag evidence so output is
+	// deterministic.
+	tags := dedupSortedKeyTags(dsKeyTagsOf(dsRecs))
 
 	return []finding.Finding{{
 		Subdomain:  target,
@@ -113,6 +118,129 @@ func DNSSEC(ctx context.Context, target string, r *resolver.Resolver) ([]finding
 				"registrar or re-sign the zone)",
 			joinKeyTags(tags), target),
 	}}, nil
+}
+
+// dsKeyTagsOf projects out the key tags from a DS-algorithm slice so the orphan
+// sub-case can reuse the existing dedupSortedKeyTags pipeline unchanged.
+func dsKeyTagsOf(dsRecs []resolver.DSAlgorithm) []uint16 {
+	out := make([]uint16, len(dsRecs))
+	for i, d := range dsRecs {
+		out[i] = d.KeyTag
+	}
+	return out
+}
+
+// weakAlgorithmFinding inspects a healthy signed delegation for DNSSEC
+// algorithms RFC 8624 has retired and returns a single Potential finding when
+// any are present. A zone that uses only modern algorithms (RSASHA256/512,
+// ECDSA, Ed25519) produces no finding — the secure normal case.
+//
+// Two surfaces are inspected:
+//
+//   - Each DNSKEY's Algorithm field, against weakDNSKEYAlgorithms. A weak key
+//     means an attacker who breaks the underlying primitive can forge zone
+//     signatures.
+//   - Each DS record's Algorithm field (the key algorithm the parent commits
+//     to) and DigestType (the hash used to fingerprint the key). A weak
+//     digest type means an attacker can craft a different key whose digest
+//     collides under the broken hash and substitute it into the chain.
+//
+// Findings list every distinct weakness observed, deduplicated and sorted, so
+// the output is stable across runs and across multiple keys sharing the same
+// algorithm.
+func weakAlgorithmFinding(target string, dsRecs []resolver.DSAlgorithm, childAlgs []resolver.DNSKEYAlgorithm) []finding.Finding {
+	weaknesses := make(map[string]struct{})
+
+	for _, a := range childAlgs {
+		if name, weak := weakDNSKEYAlgorithm(uint8(a)); weak {
+			weaknesses[name] = struct{}{}
+		}
+	}
+	for _, ds := range dsRecs {
+		if name, weak := weakDNSKEYAlgorithm(ds.Algorithm); weak {
+			weaknesses[name] = struct{}{}
+		}
+		if name, weak := weakDSDigest(ds.DigestType); weak {
+			weaknesses[name] = struct{}{}
+		}
+	}
+	if len(weaknesses) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(weaknesses))
+	for n := range weaknesses {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	// Carry the DS key tags too so an operator triaging the finding can match it
+	// against the registrar records. The tag list is stable (deduped, sorted).
+	tags := dedupSortedKeyTags(dsKeyTagsOf(dsRecs))
+
+	return []finding.Finding{{
+		Subdomain:      target,
+		Vector:         finding.VectorDNSSEC,
+		Confidence:     finding.Potential,
+		DSKeyTags:      tags,
+		DNSSECWeakAlgs: names,
+		Evidence: fmt.Sprintf(
+			"DNSSEC delegation uses weak/deprecated algorithm(s) %s (RFC 8624) — "+
+				"forgeable chain of trust; rotate to RSASHA256/RSASHA512/ECDSAP256SHA256/"+
+				"ECDSAP384SHA384/ED25519 and update the DS at the registrar",
+			strings.Join(names, ", ")),
+	}}
+}
+
+// weakDNSKEYAlgorithm names the IANA DNS Security Algorithm Numbers that
+// RFC 8624 §3.1 forbids ("MUST NOT") or deprecates ("NOT RECOMMENDED") for
+// signing. The second return value reports whether the algorithm is weak.
+//
+// Forbidden / deprecated algorithms:
+//
+//	1  RSAMD5                — MUST NOT use (MD5 collision-broken)
+//	3  DSA/SHA-1             — MUST NOT use (DSA + SHA-1)
+//	5  RSASHA1               — NOT RECOMMENDED (SHA-1 collision-broken)
+//	6  DSA-NSEC3-SHA1        — MUST NOT use
+//	7  RSASHA1-NSEC3-SHA1    — NOT RECOMMENDED
+//	12 ECC-GOST              — MUST NOT use (GOST R 34.10-2001 deprecated)
+//
+// All other registered algorithms (RSASHA256, RSASHA512, ECDSA P-256/P-384,
+// Ed25519, Ed448) are considered safe by RFC 8624 and yield ("", false).
+func weakDNSKEYAlgorithm(a uint8) (string, bool) {
+	switch a {
+	case 1:
+		return "RSAMD5", true
+	case 3:
+		return "DSA/SHA-1", true
+	case 5:
+		return "RSASHA1", true
+	case 6:
+		return "DSA-NSEC3-SHA1", true
+	case 7:
+		return "RSASHA1-NSEC3-SHA1", true
+	case 12:
+		return "ECC-GOST", true
+	default:
+		return "", false
+	}
+}
+
+// weakDSDigest names the IANA DS RR Digest Algorithms that RFC 8624 §3.3
+// deprecates. Digest type 1 (SHA-1) is NOT RECOMMENDED — SHA-1 is collision-
+// broken, so a parent that fingerprints child keys with SHA-1 cannot rule out a
+// substituted key whose SHA-1 digest matches. Digest type 0 is reserved and
+// also flagged. Digest types 2 (SHA-256, the current mandatory) and 4
+// (SHA-384) are safe and yield ("", false).
+func weakDSDigest(d uint8) (string, bool) {
+	switch d {
+	case 0:
+		return "DS-RESERVED", true
+	case 1:
+		return "DS-SHA1", true
+	default:
+		return "", false
+	}
 }
 
 // dedupSortedKeyTags returns the distinct key tags in ascending order so the

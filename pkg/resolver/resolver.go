@@ -523,6 +523,81 @@ func (r *Resolver) HasDNSKEY(ctx context.Context, host string) (found bool, err 
 	}
 }
 
+// DNSKEYAlgorithm reports the algorithm field of one of a zone's DNSKEY records
+// (RFC 4034 §2.1.3). The value is one of the IANA "DNS Security Algorithm
+// Numbers" identifiers (e.g. 5 = RSASHA1, 7 = RSASHA1-NSEC3-SHA1, 8 = RSASHA256,
+// 13 = ECDSAP256SHA256).
+type DNSKEYAlgorithm uint8
+
+// DNSKEYAlgorithms returns the algorithm numbers of every DNSKEY record published
+// by host's child zone. The result is in DNS-answer order; callers that need
+// determinism must sort and dedupe. An empty slice with a nil error means the
+// zone publishes no DNSKEY (it is unsigned, or the orphaned-DS case). A non-nil
+// error means the lookup was indeterminate (transport failure, or — as in
+// HasDNSKEY — a SERVFAIL mapped to ErrZoneDeleted because a validating resolver
+// returned it for an already-broken chain).
+//
+// Unlike HasDNSKEY this method returns one entry per key — a zone in mid-rollover
+// commonly publishes two — so the weak-algorithm check can report every weak key.
+func (r *Resolver) DNSKEYAlgorithms(ctx context.Context, host string) ([]DNSKEYAlgorithm, error) {
+	resp, err := r.query(ctx, host, dns.TypeDNSKEY)
+	if err != nil {
+		return nil, err
+	}
+	switch resp.Rcode {
+	case dns.RcodeSuccess:
+		var algs []DNSKEYAlgorithm
+		for _, rr := range resp.Answer {
+			if k, ok := rr.(*dns.DNSKEY); ok {
+				algs = append(algs, DNSKEYAlgorithm(k.Algorithm))
+			}
+		}
+		return algs, nil
+	case dns.RcodeServerFailure:
+		return nil, ErrZoneDeleted
+	default:
+		return nil, fmt.Errorf("resolver: DNSKEY query rcode %d", resp.Rcode)
+	}
+}
+
+// DSAlgorithm pairs the cryptographic algorithm of the referenced DNSKEY with
+// the digest algorithm used to fingerprint that key inside the DS record
+// (RFC 4034 §5.1). Both numbers are IANA registry identifiers; both surfaces
+// have weak values graverobber flags (e.g. Algorithm 5 = RSASHA1, DigestType 1
+// = SHA-1).
+type DSAlgorithm struct {
+	KeyTag     uint16
+	Algorithm  uint8 // DNSSEC algorithm of the referenced key
+	DigestType uint8 // hash function used to compute the DS digest
+}
+
+// DSAlgorithms returns the algorithm and digest-type fields of every DS record
+// published for host by its parent zone. The result mirrors DSKeyTags in
+// rcode/error handling: an empty slice with a nil error means the parent
+// publishes no DS, and a non-success rcode is treated as indeterminate (no
+// finding, no error wrap) so a broken parent never produces a false algorithm
+// verdict. The returned slice is in DNS-answer order; callers dedupe as needed.
+func (r *Resolver) DSAlgorithms(ctx context.Context, host string) ([]DSAlgorithm, error) {
+	resp, err := r.query(ctx, host, dns.TypeDS)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		return nil, nil
+	}
+	var out []DSAlgorithm
+	for _, rr := range resp.Answer {
+		if ds, ok := rr.(*dns.DS); ok {
+			out = append(out, DSAlgorithm{
+				KeyTag:     ds.KeyTag,
+				Algorithm:  ds.Algorithm,
+				DigestType: ds.DigestType,
+			})
+		}
+	}
+	return out, nil
+}
+
 // soaRetries is the number of UDP attempts before escalating to TCP.
 // Transient SERVFAIL and packet loss are common; retrying reduces false
 // negatives without risking false positives (a real deletion returns

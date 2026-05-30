@@ -1206,6 +1206,103 @@ updates. No new dependency.
 
 ---
 
+## Rank 25 — DNSSEC weak-algorithm detection — ✅ IMPLEMENTED (Phase 2, Rotation 31)
+
+**Status:** Shipped. Rotation 31's directive named two candidates — **DNSKEY
+algorithm weakness** or **NS lame-delegation** — as the next DNS audit vector
+to assess. Assessment found:
+
+- **NS lame-delegation is partially covered today.** The existing NS detector
+  (`detectors.NS`) classifies a deleted hosted zone (every delegated
+  nameserver returns SERVFAIL/REFUSED) — which is the strict-lame case.
+  Per-NS partial lameness (some delegated nameservers answer authoritatively,
+  some don't) is a different signal that overlaps with general DNS-health
+  monitors; it was deprioritised in favour of the cleaner crypto-weakness gap.
+- **DNSKEY algorithm weakness was not present** anywhere in the codebase. The
+  existing DNSSEC detector handled only the orphaned-DS sub-case (chain
+  missing a link) and `continue`d past every signed delegation regardless of
+  the algorithm it used. The IANA DNS Security Algorithm Numbers registry
+  contains six algorithms RFC 8624 §3.1 forbids (`MUST NOT`) or deprecates
+  (`NOT RECOMMENDED`), plus a DS digest type (SHA-1, RFC 8624 §3.3 `NOT
+  RECOMMENDED`) — a domain signing with any of them has a present-but-broken
+  chain that a well-resourced attacker can forge, defeating the protection
+  DNSSEC exists to provide. This is the second-sub-case completion the prior
+  rotations applied to SPF (`redirect=`/`a:`/`mx:`), DKIM (weak inline key),
+  DMARC (`p=none` + `https:` report URI), and CAA (`iodef`), applied now to
+  the DNSSEC plane.
+
+Implemented as a second sub-case of the existing `dnssec` vector — no new
+vector constant, no new CLI flag (covered by the existing `--no-dnssec`
+opt-out). Two new resolver primitives back it: `DNSKEYAlgorithms` (the
+algorithm field of every child DNSKEY, mirroring `HasDNSKEY` but returning
+each key so the detector can flag every weakness) and `DSAlgorithms` (the
+key-algorithm and digest-type fields of every parent DS, mirroring
+`DSKeyTags`). The detector now branches when the chain is healthy:
+`weakAlgorithmFinding` inspects both surfaces (every DNSKEY's `Algorithm`,
+every DS's `Algorithm` and `DigestType`) against the RFC 8624 mapping in
+`weakDNSKEYAlgorithm` / `weakDSDigest`, and emits a `POTENTIAL` `dnssec`
+finding listing every distinct weakness in a deduped, sorted
+`DNSSECWeakAlgs` slice. The DS key tags ride along in `DSKeyTags` so an
+operator can map the weakness back to specific registrar records. The two
+sub-cases are distinguished by whether `DNSSECWeakAlgs` is populated.
+
+**Schema:** new `DNSSECWeakAlgs []string` (`json:"dnssec_weak_algs,omitempty"`)
+on `Finding`. No new flag, no new vector constant.
+
+Wired end to end. All four output paths render the new sub-case — terminal
+(`dnssec weak algorithm(s) RSASHA1 (RFC 8624 deprecated — forgeable chain)`),
+JSONL (`dnssec_weak_algs`), SARIF (`graverobber/dnssec` rule descriptor
+extended to cover both sub-cases, distinct result detail per sub-case), and
+CSV (the weakness names in the `target` column). The SARIF
+`partialFingerprint` remains `(subdomain, vector)` since both sub-cases trace
+to the same delegation. The orphan sub-case is unchanged and keeps priority
+when no DNSKEY is present (verified by
+`TestDNSSEC_OrphanFindingHasNoWeakAlgs`).
+
+Guarded by 5 new detector tests in `pkg/detectors/dnssec_test.go` plus an
+algorithm-aware `dnssecDNSServerEx` harness extension:
+`TestWeakDNSKEYAlgorithm` (the RFC 8624 mapping table, every forbidden /
+deprecated value + every modern safe value), `TestWeakDSDigest` (the digest
+mapping), `TestDNSSEC_WeakChildKeyAlgorithmPotential` (the full detector with
+a RSASHA1 child key), `TestDNSSEC_WeakDSDigestPotential` (SHA-1 DS digest
+with an ECDSA key — weakness in the DS even when the key is modern),
+`TestDNSSEC_MultipleWeaknessesDedupSorted` (consolidation across multiple
+DNSKEYs and DS records into one finding with deduplicated, sorted weakness
+names), `TestDNSSEC_ModernAlgorithmsNoFinding` (the regression guard — a
+healthy ECDSA + SHA-256 delegation produces no finding), and
+`TestDNSSEC_OrphanFindingHasNoWeakAlgs` (sub-case priority: orphan still
+fires when no DNSKEY is present, never the weak-algorithm branch). Plus 4
+new resolver tests in `pkg/resolver/resolver_test.go`:
+`TestDSAlgorithms_ReturnsAlgoAndDigest`, `TestDSAlgorithms_EmptyWhenNoDS`,
+`TestDNSKEYAlgorithms_ReturnsEveryKey`,
+`TestDNSKEYAlgorithms_ServfailIsZoneDeleted`. The terminal, CSV, and SARIF
+per-vector output tests gained a `dnssec-weak-algorithm` case each, and the
+JSONL omit-empty-fields regression guard was extended with `dnssec_weak_algs`
+and `ds_key_tags`. Full suite green under `-race`, `go vet` clean. README
+DNSSEC section restructured into two sub-cases with the RFC 8624 algorithm
+table and a new JSONL example line; `--no-dnssec` flag-table description and
+the headline vector table row updated.
+
+**Why this over NS lame-delegation:** the NS detector's existing
+all-nameservers-SERVFAIL signal already covers the takeover-relevant
+lame-delegation case; per-NS lameness without takeover is a DNS-health
+signal that overlaps with dedicated monitoring tools. DNSKEY algorithm
+weakness, by contrast, is a genuinely new, exploitable-by-omission,
+DNS-only signal on a record the detector already parses but previously
+inspected only for presence — closing DNSSEC coverage with the same
+"complete an existing vector" disposition that worked for the SPF / DKIM /
+DMARC / CAA second sub-cases.
+
+**Complexity:** Low-Med — two new resolver methods, one new helper trio in
+the detector (`weakAlgorithmFinding` + `weakDNSKEYAlgorithm` +
+`weakDSDigest`), one schema field, no new vector/flag, three output-detail
+arms (terminal/CSV/SARIF), 9 new tests + 3 extended output tables + 1
+extended JSONL guard, README + POST_V01 updates. No new dependency
+(`miekg/dns` already exposes the `Algorithm` and `DigestType` fields on
+`*dns.DNSKEY` and `*dns.DS`).
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -1250,3 +1347,4 @@ updates. No new dependency.
 | 22 | TLSRPT dangling-report-destination detection (13th vector) ✅ | Low-Med | High (new SMTP-TLS reporting surface, report interception + downgrade-masking) | Yes (new vector + field + flag) |
 | 23 | DMARC `https:` report-URI dangling-host detection ✅ | Low | High (completes DMARC report-URI coverage, same report interception) | No (extends `dmarc`, reuses field + flag) |
 | 24 | SPF DNS-lookup-limit (§4.6.4 `permerror`) detection ✅ | Low | High (completes SPF coverage, spoofable-by-omission via DMARC alignment collapse) | Yes (new field, no flag) |
+| 25 | DNSSEC weak/deprecated algorithm detection (RFC 8624) ✅ | Low-Med | High (completes DNSSEC coverage, forgeable chain of trust) | Yes (new field, no flag) |

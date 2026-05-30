@@ -161,6 +161,11 @@ func csvTarget(f finding.Finding) string {
 		// target the attacker would reclaim.
 		return fmt.Sprintf("%s (NXDOMAIN)", f.BIMIURIHost)
 	case finding.VectorDNSSEC:
+		if len(f.DNSSECWeakAlgs) > 0 {
+			// The weak-algorithm sub-case names the deprecated DNSSEC algorithm(s)
+			// (RFC 8624) so an operator can plan the key rollover.
+			return fmt.Sprintf("weak DNSSEC algorithm(s) %s (RFC 8624 deprecated)", strings.Join(f.DNSSECWeakAlgs, ", "))
+		}
 		// The orphaned DS key tags name exactly which registrar records must be
 		// removed (or matched by re-signing) to repair the broken chain.
 		return fmt.Sprintf("orphaned DS %s (no child DNSKEY)", formatKeyTags(f.DSKeyTags))

@@ -984,3 +984,145 @@ func TestHasDNSKEY_ServfailIsZoneDeleted(t *testing.T) {
 		t.Errorf("expected ErrZoneDeleted on SERVFAIL, got %v", err)
 	}
 }
+
+// dnssecAlgServer starts a UDP DNS server that answers DS queries with the
+// given (key tag, algorithm, digest type) tuples and DNSKEY queries with the
+// given algorithm bytes (one DNSKEY record per entry). It backs the
+// DSAlgorithms and DNSKEYAlgorithms tests.
+func dnssecAlgServer(t *testing.T, ds []struct {
+	KeyTag     uint16
+	Algorithm  uint8
+	DigestType uint8
+}, dnskeyAlgs []uint8, dnskeyRcode int) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { pc.Close() })
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if pErr := req.Unpack(buf[:n]); pErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			q := req.Question[0]
+			switch q.Qtype {
+			case dns.TypeDS:
+				for _, d := range ds {
+					resp.Answer = append(resp.Answer, &dns.DS{
+						Hdr:        dns.RR_Header{Name: q.Name, Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600},
+						KeyTag:     d.KeyTag,
+						Algorithm:  d.Algorithm,
+						DigestType: d.DigestType,
+						Digest:     "00",
+					})
+				}
+			case dns.TypeDNSKEY:
+				resp.Rcode = dnskeyRcode
+				for _, alg := range dnskeyAlgs {
+					resp.Answer = append(resp.Answer, &dns.DNSKEY{
+						Hdr:   dns.RR_Header{Name: q.Name, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+						Flags: 257, Protocol: 3, Algorithm: alg, PublicKey: "AwEAAa==",
+					})
+				}
+			}
+			packed, _ := resp.Pack()
+			_, _ = pc.WriteTo(packed, addr)
+		}
+	}()
+	return pc.LocalAddr().String()
+}
+
+// TestDSAlgorithms_ReturnsAlgoAndDigest verifies DSAlgorithms surfaces both the
+// referenced-key algorithm and the digest type the DS uses to fingerprint it.
+// These are the two fields the DNSSEC weak-algorithm detector inspects.
+func TestDSAlgorithms_ReturnsAlgoAndDigest(t *testing.T) {
+	addr := dnssecAlgServer(t, []struct {
+		KeyTag     uint16
+		Algorithm  uint8
+		DigestType uint8
+	}{
+		{KeyTag: 1111, Algorithm: 5, DigestType: 1}, // RSASHA1 + SHA-1 — both weak
+		{KeyTag: 2222, Algorithm: 13, DigestType: 2}, // ECDSA + SHA-256 — both safe
+	}, []uint8{13}, dns.RcodeSuccess)
+
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := r.DSAlgorithms(ctx, "weak.example.com")
+	if err != nil {
+		t.Fatalf("DSAlgorithms: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("DSAlgorithms returned %d records, want 2: %+v", len(got), got)
+	}
+	if got[0].KeyTag != 1111 || got[0].Algorithm != 5 || got[0].DigestType != 1 {
+		t.Errorf("DS[0] = %+v, want {1111 5 1}", got[0])
+	}
+	if got[1].KeyTag != 2222 || got[1].Algorithm != 13 || got[1].DigestType != 2 {
+		t.Errorf("DS[1] = %+v, want {2222 13 2}", got[1])
+	}
+}
+
+// TestDSAlgorithms_EmptyWhenNoDS verifies DSAlgorithms returns an empty slice
+// (no error) when the parent publishes no DS — the unsigned-delegation case.
+func TestDSAlgorithms_EmptyWhenNoDS(t *testing.T) {
+	addr := dnssecAlgServer(t, nil, nil, dns.RcodeSuccess)
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := r.DSAlgorithms(ctx, "insecure.example.com")
+	if err != nil {
+		t.Fatalf("DSAlgorithms: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected no DS records for an unsigned delegation, got %+v", got)
+	}
+}
+
+// TestDNSKEYAlgorithms_ReturnsEveryKey verifies the method returns one entry
+// per DNSKEY (a zone in mid-rollover commonly publishes more than one) and
+// that the order of the answer is preserved.
+func TestDNSKEYAlgorithms_ReturnsEveryKey(t *testing.T) {
+	addr := dnssecAlgServer(t, nil, []uint8{5, 13}, dns.RcodeSuccess) // RSASHA1 + ECDSA
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := r.DNSKEYAlgorithms(ctx, "signed.example.com")
+	if err != nil {
+		t.Fatalf("DNSKEYAlgorithms: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("DNSKEYAlgorithms returned %d entries, want 2: %v", len(got), got)
+	}
+	if got[0] != 5 || got[1] != 13 {
+		t.Errorf("DNSKEYAlgorithms = %v, want [5 13]", got)
+	}
+}
+
+// TestDNSKEYAlgorithms_ServfailIsZoneDeleted verifies SERVFAIL on DNSKEY maps
+// to ErrZoneDeleted, mirroring HasDNSKEY so the orphan-vs-weak routing is
+// consistent.
+func TestDNSKEYAlgorithms_ServfailIsZoneDeleted(t *testing.T) {
+	addr := dnssecAlgServer(t, nil, nil, dns.RcodeServerFailure)
+	r := New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err := r.DNSKEYAlgorithms(ctx, "broken.example.com")
+	if !errors.Is(err, ErrZoneDeleted) {
+		t.Errorf("expected ErrZoneDeleted on SERVFAIL, got %v", err)
+	}
+}

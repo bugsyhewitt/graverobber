@@ -107,17 +107,25 @@ const (
 	// in BIMIURIHost and the BIMI owner name (e.g. "default._bimi.example.com") in
 	// Service.
 	VectorBIMI Vector = "bimi"
-	// VectorDNSSEC: a domain's PARENT zone publishes a DS (Delegation Signer,
-	// RFC 4034) record committing every validating resolver to an authenticated
-	// DNSSEC chain into the domain's zone, but the domain itself publishes NO
-	// DNSKEY — an orphaned DS. The chain of trust cannot be built, so every
-	// DNSSEC-validating resolver (the default at Google Public DNS, Cloudflare
-	// 1.1.1.1, Quad9, and most ISPs) returns SERVFAIL for the entire zone: the
-	// domain and all its records become unreachable to a large fraction of the
-	// internet — a self-inflicted denial of service, typically caused by
-	// disabling DNSSEC at the child or migrating DNS providers without first
-	// removing the DS at the registrar. The orphaned DS key tags are carried in
-	// DSKeyTags and the Evidence string explains the broken chain.
+	// VectorDNSSEC: a domain's DNSSEC delegation is broken or cryptographically
+	// weak. In the orphaned-DS sub-case the PARENT zone publishes a DS
+	// (Delegation Signer, RFC 4034) record committing every validating resolver to
+	// an authenticated DNSSEC chain into the domain's zone, but the domain itself
+	// publishes NO DNSKEY — an orphaned DS; the chain of trust cannot be built,
+	// so every DNSSEC-validating resolver (the default at Google Public DNS,
+	// Cloudflare 1.1.1.1, Quad9, and most ISPs) returns SERVFAIL for the entire
+	// zone (a self-inflicted denial of service, typically caused by disabling
+	// DNSSEC at the child or migrating DNS providers without first removing the
+	// DS at the registrar). The orphaned DS key tags are carried in DSKeyTags. In
+	// the weak-algorithm sub-case the chain is intact but at least one DNSKEY or
+	// DS uses an algorithm RFC 8624 forbids ("MUST NOT") or deprecates ("NOT
+	// RECOMMENDED") — RSAMD5 (1), DSA/SHA-1 (3), RSASHA1 (5), DSA-NSEC3-SHA1 (6),
+	// RSASHA1-NSEC3-SHA1 (7), ECC-GOST (12), or a DS digest type of SHA-1 (1);
+	// the cryptography is broken or deprecated enough that a well-resourced
+	// attacker can forge a valid-looking chain. The offending algorithm names are
+	// carried in DNSSECWeakAlgs. The two sub-cases are distinguished by which of
+	// DSKeyTags (orphan) or DNSSECWeakAlgs (weak algorithm) is set; the Evidence
+	// string also names the sub-case.
 	VectorDNSSEC Vector = "dnssec"
 	// VectorTLSRPT: a domain advertises SMTP TLS Reporting (TLSRPT, RFC 8460) via
 	// a "v=TLSRPTv1" TXT record at _smtp._tls.<domain> whose rua= report
@@ -279,6 +287,20 @@ type Finding struct {
 	// NXDOMAIN and therefore reclaimable. The TLSRPT owner name is carried in
 	// Service.
 	TLSRPTURIHost string `json:"tlsrpt_uri_host,omitempty"`
+	// DNSSECWeakAlgs is set for the weak-algorithm VectorDNSSEC sub-case: the
+	// human-readable names of the deprecated/forbidden DNSSEC algorithms (or DS
+	// digest types) graverobber observed on the target's signed delegation, e.g.
+	// "RSAMD5" (Algorithm 1, MUST NOT use), "RSASHA1" (Algorithm 5, NOT
+	// RECOMMENDED), or "DS-SHA1" (DS digest type 1, NOT RECOMMENDED). Entries are
+	// deduplicated and sorted so the finding is stable across runs regardless of
+	// DNS answer ordering. The field is empty for the orphaned-DS sub-case, which
+	// is identified instead by DSKeyTags + the absence of any child DNSKEY (the
+	// Evidence string also distinguishes the two cases). Per RFC 8624 and the
+	// IANA DNSSEC Algorithm Numbers registry these algorithms are
+	// cryptographically broken or deprecated; their continued use lets a
+	// well-resourced attacker forge a valid DNSSEC chain for the zone, defeating
+	// the protection DNSSEC exists to provide.
+	DNSSECWeakAlgs []string `json:"dnssec_weak_algs,omitempty"`
 
 	// Scheme records which scheme produced an HTTP-based match: "https" or
 	// "http" (see handoff open question #4).
