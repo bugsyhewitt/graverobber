@@ -15,6 +15,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -609,6 +610,64 @@ const soaRetries = 3
 // test runtime acceptable without changing production behavior.
 var soaBackoff = 150 * time.Millisecond
 
+// soaNameserverRewrite maps a nameserver hostname to a dial address
+// (host:port). It exists so cross-package tests can drive AuthoritativeSOA at
+// multiple distinct test servers without binding privileged port 53 — the same
+// testability pattern as axfrPort. Production code never reads or writes this
+// map; it is empty in production. A non-empty mapping for a given nameserver
+// replaces the host:port that would otherwise be dialed.
+var (
+	soaRewriteMu sync.Mutex
+	soaRewrites  map[string]string
+)
+
+// SetSOANameserverRewriteForTest installs a hostname → dial-address rewrite
+// used by AuthoritativeSOA. It returns a restore function that undoes the
+// installation. It MUST only be called from tests; production code never
+// imports it. The receiver of the returned func is responsible for invoking it
+// (typically via t.Cleanup). Calling SetSOANameserverRewriteForTest with a nil
+// or empty map disables rewriting (and the restore func re-applies whatever
+// was set before).
+func SetSOANameserverRewriteForTest(m map[string]string) (restore func()) {
+	soaRewriteMu.Lock()
+	prev := soaRewrites
+	if len(m) == 0 {
+		soaRewrites = nil
+	} else {
+		soaRewrites = make(map[string]string, len(m))
+		for k, v := range m {
+			soaRewrites[k] = v
+		}
+	}
+	soaRewriteMu.Unlock()
+	return func() {
+		soaRewriteMu.Lock()
+		soaRewrites = prev
+		soaRewriteMu.Unlock()
+	}
+}
+
+// soaDialTarget returns the address AuthoritativeSOA should dial for the
+// given nameserver name, applying any test rewrite. The lookup is keyed on
+// both the raw input and a port-stripped form so callers may pre-format the
+// nameserver with a port.
+func soaDialTarget(nameserver string) string {
+	soaRewriteMu.Lock()
+	defer soaRewriteMu.Unlock()
+	if soaRewrites == nil {
+		return nameserver
+	}
+	if v, ok := soaRewrites[nameserver]; ok {
+		return v
+	}
+	if host, _, err := net.SplitHostPort(nameserver); err == nil {
+		if v, ok := soaRewrites[host]; ok {
+			return v
+		}
+	}
+	return nameserver
+}
+
 // AuthoritativeSOA queries nameserver directly for the SOA of zone. An error
 // that wraps ErrZoneDeleted means the hosted zone no longer exists.
 //
@@ -619,6 +678,11 @@ var soaBackoff = 150 * time.Millisecond
 //     firewalls that silently drop UDP), TCP is attempted once before giving up.
 //     This covers the common case of UDP-blocked resolvers.
 func (r *Resolver) AuthoritativeSOA(ctx context.Context, zone, nameserver string) error {
+	// Apply any test-only nameserver→dial-address rewrite first, then ensure
+	// the result carries an explicit port. The rewrite map is empty in
+	// production, so the production path is unchanged: every nameserver is
+	// dialed at its own :53 (or its existing port).
+	nameserver = soaDialTarget(nameserver)
 	if _, _, err := net.SplitHostPort(nameserver); err != nil {
 		nameserver = net.JoinHostPort(nameserver, "53")
 	}

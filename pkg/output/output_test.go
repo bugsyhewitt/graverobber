@@ -123,6 +123,19 @@ func TestTerminalWriter_RendersDetailForEveryVector(t *testing.T) {
 			wantSub: []string{"example.com", "ns1.gone.net"},
 		},
 		{
+			// R32 partial-lame sub-case: the terminal renders "ns
+			// partial-lame [...]" so the operator distinguishes the
+			// partial-hijack precondition from a full zone deletion.
+			name: "ns-partial-lame",
+			f: finding.Finding{
+				Subdomain: "example.com", Vector: finding.VectorNS,
+				Confidence:  finding.Potential,
+				Nameservers: []string{"ns2.lame.net"},
+				Evidence:    "partial lame delegation: 1 of 2 nameservers returned SERVFAIL/REFUSED for zone SOA while others answered authoritatively",
+			},
+			wantSub: []string{"example.com", "partial-lame", "ns2.lame.net"},
+		},
+		{
 			name: "mx",
 			f: finding.Finding{
 				Subdomain: "example.com", Vector: finding.VectorMX,
