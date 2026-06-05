@@ -153,9 +153,12 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 			detail = "caa authorises any CA (permissive)"
 		}
 	case finding.VectorTLSA:
-		if len(f.MXHosts) > 0 {
+		switch {
+		case len(f.MXHosts) > 0:
 			detail = fmt.Sprintf("tlsa %s pins %s NXDOMAIN (dangling DANE pin)", f.TLSAName, f.MXHosts[0])
-		} else {
+		case strings.HasPrefix(f.TLSAName, "_443._tcp."):
+			detail = fmt.Sprintf("tlsa %s does not match served HTTPS certificate (broken DANE pin)", f.TLSAName)
+		default:
 			detail = fmt.Sprintf("tlsa %s dangling DANE pin", f.TLSAName)
 		}
 	case finding.VectorMTASTS:
