@@ -281,6 +281,19 @@ type Finding struct {
 	// It is empty for the dangling-report-domain sub-case, which is identified
 	// instead by the DMARCURI field.
 	DMARCPolicy string `json:"dmarc_policy,omitempty"`
+	// DMARCSubdomainPolicy is set for the weak-subdomain-policy VectorDMARC
+	// sub-case: the explicit sp= tag value when it is "none" and the parent
+	// policy (p=) is "reject" or "quarantine". RFC 7489 §6.3 defines sp= as
+	// the subdomain policy override: when sp=none is present, every subdomain
+	// of the target is freely spoofable even if the parent domain has strong
+	// enforcement (p=reject/quarantine). This is the "split enforcement"
+	// misconfiguration — a domain appears DMARC-protected at the apex while
+	// all subdomains remain spoofable (the precondition for subdomain phishing
+	// and business-email-compromise from subdomains). The three sub-cases are
+	// distinguished by which field is set: DMARCPolicy (p=none on parent),
+	// DMARCSubdomainPolicy (sp=none with enforcing parent p=), or DMARCURI
+	// (dangling report host).
+	DMARCSubdomainPolicy string `json:"dmarc_subdomain_policy,omitempty"`
 	// CAAIssuer is set for the two dangling VectorCAA sub-cases: the claimable
 	// CA domain named by an issue=/issuewild= tag whose host is NXDOMAIN, or the
 	// claimable report host parsed from an iodef= tag's URL (mailto: or http(s)://)

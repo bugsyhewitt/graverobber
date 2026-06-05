@@ -138,7 +138,7 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVar(&f.noSPF, "no-spf", false, "skip SPF include/permissive-all/§4.6.4-lookup-limit checks")
 	fl.BoolVar(&f.noMX, "no-mx", false, "skip MX dangling-record checks")
 	fl.BoolVar(&f.noDKIM, "no-dkim", false, "skip DKIM selector dangling-CNAME checks")
-	fl.BoolVar(&f.noDMARC, "no-dmarc", false, "skip DMARC report-host dangling + p=none checks")
+	fl.BoolVar(&f.noDMARC, "no-dmarc", false, "skip DMARC report-host dangling, p=none, and sp=none checks")
 	fl.BoolVar(&f.noAXFR, "no-axfr", false, "skip AXFR zone-transfer misconfiguration checks")
 	fl.BoolVar(&f.noCAA, "no-caa", false, "skip CAA (Certification Authority Authorization) misconfiguration checks")
 	fl.BoolVar(&f.noTLSA, "no-tlsa", false, "skip TLSA dangling-DANE-pin checks")

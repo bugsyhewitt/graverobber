@@ -1270,6 +1270,212 @@ func TestDMARC_NoRecordNoFinding(t *testing.T) {
 	}
 }
 
+// ---- DMARC sp= subdomain-policy sub-case -----------------------------------
+
+// TestDMARCSubdomainPolicy unit-tests the sp= tag parser.
+func TestDMARCSubdomainPolicy(t *testing.T) {
+	cases := []struct {
+		record string
+		want   string
+	}{
+		{"v=DMARC1; p=reject; sp=none", "none"},
+		{"v=DMARC1; p=quarantine; sp=none", "none"},
+		{"v=DMARC1; p=reject; sp=reject", "reject"},
+		{"v=DMARC1; p=reject; sp=quarantine", "quarantine"},
+		// sp= absent — inherit parent policy
+		{"v=DMARC1; p=reject", ""},
+		// case-insensitive tag name
+		{"v=DMARC1; p=reject; SP=NONE", "none"},
+		// sp=none mixed with other tags
+		{"v=DMARC1; p=reject; rua=mailto:a@r.example; sp=none; pct=100", "none"},
+		// p=none + sp=none — only parent finding fires
+		{"v=DMARC1; p=none; sp=none", "none"},
+	}
+	for _, c := range cases {
+		if got := dmarcSubdomainPolicy(c.record); got != c.want {
+			t.Errorf("dmarcSubdomainPolicy(%q) = %q, want %q", c.record, got, c.want)
+		}
+	}
+}
+
+// TestDMARC_WeakSubdomainPolicyPotential drives the full detector: a domain
+// with p=reject (strong parent enforcement) and explicit sp=none (no subdomain
+// enforcement) must produce exactly one Potential finding carrying
+// DMARCSubdomainPolicy="none".
+func TestDMARC_WeakSubdomainPolicyPotential(t *testing.T) {
+	const target = "example.com"
+	record := "v=DMARC1; p=reject; sp=none"
+
+	addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.DMARCSubdomainPolicy != "none" {
+		t.Errorf("DMARCSubdomainPolicy: got %q, want %q", f.DMARCSubdomainPolicy, "none")
+	}
+	if f.Vector != finding.VectorDMARC {
+		t.Errorf("Vector: got %q, want VectorDMARC", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("Confidence: got %q, want Potential", f.Confidence)
+	}
+	if !strings.Contains(f.Evidence, "sp=none") {
+		t.Errorf("evidence %q does not mention sp=none", f.Evidence)
+	}
+	if !strings.Contains(f.Evidence, "p=reject") {
+		t.Errorf("evidence %q does not mention parent p=reject", f.Evidence)
+	}
+}
+
+// TestDMARC_WeakSubdomainPolicyQuarantine verifies that sp=none fires for
+// p=quarantine (enforcing) as well as p=reject.
+func TestDMARC_WeakSubdomainPolicyQuarantine(t *testing.T) {
+	const target = "example.com"
+	record := "v=DMARC1; p=quarantine; sp=none"
+
+	addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %+v", len(findings), findings)
+	}
+	if findings[0].DMARCSubdomainPolicy != "none" {
+		t.Errorf("DMARCSubdomainPolicy: got %q, want %q", findings[0].DMARCSubdomainPolicy, "none")
+	}
+}
+
+// TestDMARC_SpNoneWithPNoneNoSubdomainFinding verifies that when the parent
+// policy is p=none the subdomain-policy sub-case is NOT emitted separately —
+// the existing p=none parent finding already covers all mail (parent + subdomains).
+func TestDMARC_SpNoneWithPNoneNoSubdomainFinding(t *testing.T) {
+	const target = "example.com"
+	record := "v=DMARC1; p=none; sp=none"
+
+	addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	// Only the p=none finding; the sp=none finding must NOT fire when p=none.
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding (p=none only), got %d: %+v", len(findings), findings)
+	}
+	if findings[0].DMARCPolicy != "none" {
+		t.Errorf("expected DMARCPolicy=none finding, got: %+v", findings[0])
+	}
+}
+
+// TestDMARC_SpRejectWithPRejectNoSubdomainFinding verifies that sp=reject on a
+// p=reject domain never fires — all subdomains inherit the same enforcement.
+func TestDMARC_SpRejectWithPRejectNoSubdomainFinding(t *testing.T) {
+	const target = "example.com"
+	record := "v=DMARC1; p=reject; sp=reject"
+
+	addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("sp=reject+p=reject: expected no findings, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestDMARC_SpNoneAbsentWithPRejectNoSubdomainFinding verifies that when sp= is
+// absent (no explicit tag) the subdomain-policy sub-case is NOT fired — absent sp=
+// means subdomains inherit the parent p=, which is the healthy configuration.
+func TestDMARC_SpNoneAbsentWithPRejectNoSubdomainFinding(t *testing.T) {
+	const target = "example.com"
+	record := "v=DMARC1; p=reject; rua=mailto:a@live.example.net"
+
+	addr, cleanup := dmarcDNSServer(t, target, record, "unused.invalid")
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("absent sp= + p=reject: expected no findings, got %d: %+v", len(findings), findings)
+	}
+}
+
+// TestDMARC_WeakSubdomainAndDanglingReport verifies that sp=none (subdomain
+// weak-policy) and a dangling rua= report host both fire as independent findings.
+func TestDMARC_WeakSubdomainAndDanglingReport(t *testing.T) {
+	const target = "example.com"
+	const reportHost = "dangling-rua.example.net"
+	record := "v=DMARC1; p=reject; sp=none; rua=mailto:agg@" + reportHost
+
+	addr, cleanup := dmarcDNSServer(t, target, record, reportHost)
+	defer cleanup()
+
+	r := resolver.New([]string{addr}, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	findings, err := DMARC(ctx, target, r)
+	if err != nil {
+		t.Fatalf("DMARC: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings (sp=none + dangling), got %d: %+v", len(findings), findings)
+	}
+	// Order: subdomain-policy finding first (emitted before report-host probing),
+	// then the dangling-report finding.
+	hasSP := false
+	hasDangling := false
+	for _, f := range findings {
+		if f.DMARCSubdomainPolicy != "" {
+			hasSP = true
+		}
+		if f.DMARCURI != "" {
+			hasDangling = true
+		}
+	}
+	if !hasSP {
+		t.Error("missing sp=none finding")
+	}
+	if !hasDangling {
+		t.Error("missing dangling-report finding")
+	}
+}
+
 // ---- SPF redirect= modifier ------------------------------------------------
 
 // TestSPFReferences verifies that the include:, a:, and mx: mechanisms and the

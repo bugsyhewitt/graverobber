@@ -139,6 +139,8 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		switch {
 		case f.DMARCPolicy != "":
 			detail = fmt.Sprintf("dmarc policy p=%s (monitor-only)", f.DMARCPolicy)
+		case f.DMARCSubdomainPolicy != "":
+			detail = fmt.Sprintf("dmarc sp=%s (subdomains spoofable — parent policy enforcing)", f.DMARCSubdomainPolicy)
 		case f.DMARCURI != "":
 			detail = fmt.Sprintf("dmarc rua/ruf:%s", f.DMARCURI)
 		}
