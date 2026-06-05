@@ -179,6 +179,8 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 		}
 	case finding.VectorTLSRPT:
 		detail = fmt.Sprintf("tlsrpt report host %s NXDOMAIN (dangling — TLS-report interception)", f.TLSRPTURIHost)
+	case finding.VectorAutodiscover:
+		detail = fmt.Sprintf("autodiscover host %s NXDOMAIN (dangling -> %s — mail-client credential harvest)", f.Service, f.CNAME)
 	}
 
 	_, err := fmt.Fprintf(t.w, "[%s] [%s] %s  %s\n",

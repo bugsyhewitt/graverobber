@@ -63,38 +63,39 @@ func run() error {
 
 // cliFlags holds the parsed flag values for the root scan command.
 type cliFlags struct {
-	target        string
-	list          string
-	concurrency   int
-	timeout       int
-	output        string
-	json          bool
-	sarif         bool
-	csv           bool
-	silent        bool
-	verbose       bool
-	noNS          bool
-	noSPF         bool
-	noMX          bool
-	noDKIM        bool
-	noDMARC       bool
-	noAXFR        bool
-	noCAA         bool
-	noTLSA        bool
-	noMTASTS      bool
-	noBIMI        bool
-	noDNSSEC      bool
-	noTLSRPT      bool
-	selectors     string
-	fingerprints  []string
-	offline       bool
-	resolvers     string
-	rateLimit     int
-	httpOnly      bool
-	httpsOnly     bool
-	verify        bool
-	githubToken   string
-	minConfidence string
+	target         string
+	list           string
+	concurrency    int
+	timeout        int
+	output         string
+	json           bool
+	sarif          bool
+	csv            bool
+	silent         bool
+	verbose        bool
+	noNS           bool
+	noSPF          bool
+	noMX           bool
+	noDKIM         bool
+	noDMARC        bool
+	noAXFR         bool
+	noCAA          bool
+	noTLSA         bool
+	noMTASTS       bool
+	noBIMI         bool
+	noDNSSEC       bool
+	noTLSRPT       bool
+	noAutodiscover bool
+	selectors      string
+	fingerprints   []string
+	offline        bool
+	resolvers      string
+	rateLimit      int
+	httpOnly       bool
+	httpsOnly      bool
+	verify         bool
+	githubToken    string
+	minConfidence  string
 }
 
 func newRootCmd() *cobra.Command {
@@ -102,15 +103,16 @@ func newRootCmd() *cobra.Command {
 
 	root := &cobra.Command{
 		Use:   "graverobber",
-		Short: "Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, DMARC, AXFR, CAA, TLSA, MTA-STS, BIMI, DNSSEC, and TLSRPT dangling/misconfigured records",
+		Short: "Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, DMARC, AXFR, CAA, TLSA, MTA-STS, BIMI, DNSSEC, TLSRPT, and Autodiscover dangling/misconfigured records",
 		Long: "graverobber digs up the subdomains your target left for dead.\n" +
 			"It detects CNAME fingerprint, NS zone-deletion, SPF include, MX\n" +
 			"dangling-record, DKIM selector, DMARC report-host takeover, AXFR\n" +
 			"zone-transfer misconfiguration, CAA misconfiguration, TLSA dangling\n" +
 			"DANE pin, MTA-STS dangling-policy-host takeover, BIMI dangling-asset\n" +
-			"host, DNSSEC orphaned-DS (broken chain-of-trust) outages, and TLSRPT\n" +
-			"dangling-report-destination interception across a stream of hosts read\n" +
-			"from stdin, a file, or -t.",
+			"host, DNSSEC orphaned-DS (broken chain-of-trust) outages, TLSRPT\n" +
+			"dangling-report-destination interception, and Autodiscover/Autoconfig\n" +
+			"dangling mail-client-autoconfiguration-host takeover across a stream of\n" +
+			"hosts read from stdin, a file, or -t.",
 		Version: version,
 		Args:    cobra.NoArgs,
 		// The command reports findings via the errFindings sentinel and its
@@ -146,6 +148,7 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVar(&f.noBIMI, "no-bimi", false, "skip BIMI dangling-asset-host checks")
 	fl.BoolVar(&f.noDNSSEC, "no-dnssec", false, "skip DNSSEC orphaned-DS (broken chain-of-trust) checks")
 	fl.BoolVar(&f.noTLSRPT, "no-tlsrpt", false, "skip TLSRPT dangling-report-destination checks")
+	fl.BoolVar(&f.noAutodiscover, "no-autodiscover", false, "skip autodiscover/autoconfig dangling mail-client-autoconfiguration-host checks")
 	fl.StringVar(&f.selectors, "selectors", "", "comma-separated DKIM selectors to probe (default: common ESP selectors)")
 	fl.StringArrayVar(&f.fingerprints, "fingerprints", nil, "additional fingerprint JSON to merge (repeatable)")
 	fl.BoolVar(&f.offline, "offline", false, "use cached/embedded fingerprints only, no network")
@@ -239,26 +242,27 @@ func runScan(ctx context.Context, f *cliFlags) error {
 	}
 
 	opts := scanner.Options{
-		Concurrency:   f.concurrency,
-		Timeout:       time.Duration(f.timeout) * time.Second,
-		RateLimit:     f.rateLimit,
-		NoNS:          f.noNS,
-		NoSPF:         f.noSPF,
-		NoMX:          f.noMX,
-		NoDKIM:        f.noDKIM,
-		NoDMARC:       f.noDMARC,
-		NoAXFR:        f.noAXFR,
-		NoCAA:         f.noCAA,
-		NoTLSA:        f.noTLSA,
-		NoMTASTS:      f.noMTASTS,
-		NoBIMI:        f.noBIMI,
-		NoDNSSEC:      f.noDNSSEC,
-		NoTLSRPT:      f.noTLSRPT,
-		HTTPOnly:      f.httpOnly,
-		HTTPSOnly:     f.httpsOnly,
-		Resolvers:     resolvers,
-		DKIMSelectors: parseSelectors(f.selectors),
-		MinConfidence: minConf,
+		Concurrency:    f.concurrency,
+		Timeout:        time.Duration(f.timeout) * time.Second,
+		RateLimit:      f.rateLimit,
+		NoNS:           f.noNS,
+		NoSPF:          f.noSPF,
+		NoMX:           f.noMX,
+		NoDKIM:         f.noDKIM,
+		NoDMARC:        f.noDMARC,
+		NoAXFR:         f.noAXFR,
+		NoCAA:          f.noCAA,
+		NoTLSA:         f.noTLSA,
+		NoMTASTS:       f.noMTASTS,
+		NoBIMI:         f.noBIMI,
+		NoDNSSEC:       f.noDNSSEC,
+		NoTLSRPT:       f.noTLSRPT,
+		NoAutodiscover: f.noAutodiscover,
+		HTTPOnly:       f.httpOnly,
+		HTTPSOnly:      f.httpsOnly,
+		Resolvers:      resolvers,
+		DKIMSelectors:  parseSelectors(f.selectors),
+		MinConfidence:  minConf,
 	}
 
 	w, closeOut, err := openWriter(f)
@@ -342,7 +346,7 @@ var summaryVectorOrder = []finding.Vector{
 	finding.VectorMX, finding.VectorDKIM, finding.VectorDMARC,
 	finding.VectorAXFR, finding.VectorCAA, finding.VectorTLSA,
 	finding.VectorMTASTS, finding.VectorBIMI, finding.VectorDNSSEC,
-	finding.VectorTLSRPT,
+	finding.VectorTLSRPT, finding.VectorAutodiscover,
 }
 
 // write renders the summary to w. With no findings it prints the bare count line

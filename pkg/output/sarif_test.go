@@ -173,6 +173,7 @@ func TestSARIF_MessageSurfacesVectorDetail(t *testing.T) {
 		{"dnssec", finding.Finding{Subdomain: "example.com", Vector: finding.VectorDNSSEC, Confidence: finding.Potential, DSKeyTags: []uint16{12345}}, "12345"},
 		{"dnssec-weak-algorithm", finding.Finding{Subdomain: "example.com", Vector: finding.VectorDNSSEC, Confidence: finding.Potential, DSKeyTags: []uint16{12345}, DNSSECWeakAlgs: []string{"RSASHA1"}}, "RSASHA1"},
 		{"tlsrpt", finding.Finding{Subdomain: "example.com", Vector: finding.VectorTLSRPT, Confidence: finding.Potential, Service: "_smtp._tls.example.com", TLSRPTURIHost: "reports.gone.net"}, "reports.gone.net"},
+		{"autodiscover", finding.Finding{Subdomain: "example.com", Vector: finding.VectorAutodiscover, Confidence: finding.Potential, Service: "autodiscover.example.com", CNAME: "example.mail.dead-tenant.invalid"}, "autodiscover.example.com"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

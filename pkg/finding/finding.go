@@ -144,6 +144,20 @@ const (
 	// in TLSRPTURIHost and the TLSRPT owner name (e.g. "_smtp._tls.example.com") in
 	// Service.
 	VectorTLSRPT Vector = "tlsrpt"
+	// VectorAutodiscover: a domain's mail-client autoconfiguration host —
+	// autodiscover.<domain> (Microsoft Exchange/Outlook Autodiscover) or
+	// autoconfig.<domain> (Mozilla Thunderbird and the general convention) — is
+	// published (commonly as a CNAME to a hosted-mail provider) but resolves to
+	// NXDOMAIN, a dangling autoconfiguration host. Mail clients fetch their
+	// incoming/outgoing server settings from these hosts automatically during
+	// account setup; an attacker who reclaims the gone host serves a forged
+	// autoconfiguration payload that points the client at an attacker-controlled
+	// IMAP/SMTP server and prompts the user for mailbox credentials — a silent
+	// credential-harvesting and mail-interception surface, the same dangling-host
+	// pattern the CNAME/MX/MTA-STS/TLSRPT vectors cover, applied to the mail-client
+	// autoconfiguration plane. The dangling host is carried in Service and the
+	// claimable CNAME target (or the host itself) in CNAME.
+	VectorAutodiscover Vector = "autodiscover"
 )
 
 // Confidence is the three-tier certainty model from the v1.0 handoff.

@@ -182,6 +182,11 @@ var vectorRuleText = map[finding.Vector]struct {
 		"A TLSRPT rua= report destination host is NXDOMAIN.",
 		"A domain advertises SMTP TLS Reporting (TLSRPT, RFC 8460) via a \"v=TLSRPTv1\" TXT record at _smtp._tls.<domain> whose rua= report destination — a mailto: address domain or an https: collector host — is NXDOMAIN. TLSRPT is the feedback channel that surfaces SMTP TLS-negotiation failures, including the failures an attacker mounting a TLS downgrade against the domain's inbound mail would cause. An attacker who reclaims the dangling destination receives every TLSRPT report sent for the target: delivery-counterparty and infrastructure reconnaissance, plus a live view of the very downgrade failures that would otherwise alert the domain owner — silently confirming and tuning an active attack while the owner is blinded.",
 	},
+	finding.VectorAutodiscover: {
+		"Dangling mail-client autoconfiguration host",
+		"An autodiscover/autoconfig host is published but NXDOMAIN.",
+		"A domain's mail-client autoconfiguration host — autodiscover.<domain> (Microsoft Exchange/Outlook Autodiscover) or autoconfig.<domain> (Mozilla Thunderbird and the general convention) — is published, commonly as a CNAME to a hosted-mail provider, but resolves to NXDOMAIN. Mail clients fetch their incoming/outgoing server settings (IMAP/POP/SMTP host, port, TLS mode, auth scheme) from these hosts automatically during account setup. An attacker who reclaims the dangling host serves a forged autoconfiguration payload that points every auto-probing client at an attacker-controlled IMAP/SMTP server and prompts the user for their mailbox credentials — a silent credential-harvesting and mail-interception surface, the same dangling-host pattern the CNAME/MX/MTA-STS/TLSRPT vectors cover, applied to the mail-client autoconfiguration plane.",
+	},
 }
 
 // ruleForVector builds the SARIF rule descriptor for a vector. Unknown vectors
@@ -328,6 +333,8 @@ func sarifMessage(f finding.Finding) string {
 		}
 	case finding.VectorTLSRPT:
 		detail = fmt.Sprintf("TLSRPT report destination %s is NXDOMAIN (dangling — reclaimable to intercept SMTP-TLS failure reports)", f.TLSRPTURIHost)
+	case finding.VectorAutodiscover:
+		detail = fmt.Sprintf("mail-client autoconfiguration host %s is NXDOMAIN (dangling — reclaimable to serve a forged autoconfig payload and harvest mailbox credentials)", f.Service)
 	}
 	msg := fmt.Sprintf("[%s] %s takeover candidate on %s", f.Confidence, f.Vector, f.Subdomain)
 	if detail != "" {

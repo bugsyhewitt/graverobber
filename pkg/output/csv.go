@@ -193,6 +193,13 @@ func csvTarget(f finding.Finding) string {
 		// The dangling TLSRPT report host (mailto domain or https collector) is the
 		// actionable target the attacker would reclaim to intercept TLS reports.
 		return fmt.Sprintf("%s (NXDOMAIN)", f.TLSRPTURIHost)
+	case finding.VectorAutodiscover:
+		// The dangling autoconfiguration host and the claimable target it points at
+		// are the actionable datum the attacker would reclaim.
+		if f.CNAME != "" && f.CNAME != f.Service {
+			return fmt.Sprintf("%s -> %s (NXDOMAIN)", f.Service, f.CNAME)
+		}
+		return fmt.Sprintf("%s (NXDOMAIN)", f.Service)
 	default:
 		return ""
 	}
