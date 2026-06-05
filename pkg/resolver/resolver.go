@@ -433,10 +433,10 @@ func (r *Resolver) CAA(ctx context.Context, host string) ([]CAARecord, error) {
 // "_25._tcp.mx.example.com". An empty/zero result with a nil error means no
 // TLSA record set exists at host.
 //
-// graverobber does not interpret the TLSA RDATA (usage/selector/matching-type or
-// the certificate-association payload): the dangling-DANE vector only needs to
-// know that a pin EXISTS for a host whose underlying mail exchanger is NXDOMAIN.
-// The count is surfaced as evidence.
+// graverobber's dangling-DANE detector only needs to know that a pin EXISTS for
+// a host whose underlying mail exchanger is NXDOMAIN, so the count is surfaced as
+// evidence and the RDATA is not interpreted. Callers that need to validate the
+// pin against an observed certificate use TLSARecords instead.
 func (r *Resolver) TLSA(ctx context.Context, host string) (count int, err error) {
 	resp, err := r.query(ctx, host, dns.TypeTLSA)
 	if err != nil {
@@ -451,6 +451,50 @@ func (r *Resolver) TLSA(ctx context.Context, host string) (count int, err error)
 		}
 	}
 	return count, nil
+}
+
+// TLSARecord is a single TLSA (DANE) resource record (RFC 6698 §2.1). The fields
+// mirror the wire format: Usage (PKIX-TA/PKIX-EE/DANE-TA/DANE-EE = 0/1/2/3),
+// Selector (full cert = 0, SPKI = 1), MatchingType (full = 0, SHA-256 = 1,
+// SHA-512 = 2), and Cert — the certificate-association payload as a lower-case
+// hex string (the form miekg/dns publishes; the TLSA-validation detector hex-
+// decodes it before comparing).
+type TLSARecord struct {
+	Usage        uint8
+	Selector     uint8
+	MatchingType uint8
+	Cert         string
+}
+
+// TLSARecords returns the full TLSA RDATA published at host (the DANE-prefixed
+// name, e.g. "_443._tcp.example.com"). An empty slice with a nil error means no
+// TLSA records exist there.
+//
+// This is the data-bearing companion to TLSA: the dangling-pin detector uses the
+// count-only TLSA helper, while the TLSA-validation detector needs every
+// record's Usage/Selector/MatchingType plus the certificate-association payload
+// to check whether the observed leaf certificate (or its SPKI) actually matches
+// at least one of the published associations (RFC 7671 §5).
+func (r *Resolver) TLSARecords(ctx context.Context, host string) ([]TLSARecord, error) {
+	resp, err := r.query(ctx, host, dns.TypeTLSA)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		return nil, nil
+	}
+	var out []TLSARecord
+	for _, rr := range resp.Answer {
+		if t, ok := rr.(*dns.TLSA); ok {
+			out = append(out, TLSARecord{
+				Usage:        t.Usage,
+				Selector:     t.Selector,
+				MatchingType: t.MatchingType,
+				Cert:         strings.ToLower(strings.TrimSpace(t.Certificate)),
+			})
+		}
+	}
+	return out, nil
 }
 
 // DSKeyTags returns the key tags of the DS (Delegation Signer, RFC 4034)

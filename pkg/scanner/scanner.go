@@ -174,6 +174,9 @@ var (
 	tlsaVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
 		return detectors.TLSA(ctx, target, s.resolver)
 	}
+	tlsaHTTPSVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.TLSAHTTPS(ctx, target, s.resolver)
+	}
 	mtaStsVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
 		return detectors.MTASTS(ctx, target, s.resolver)
 	}
@@ -226,7 +229,7 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.M
 		vectors = append(vectors, caaVector)
 	}
 	if !s.opts.NoTLSA {
-		vectors = append(vectors, tlsaVector)
+		vectors = append(vectors, tlsaVector, tlsaHTTPSVector)
 	}
 	if !s.opts.NoMTASTS {
 		vectors = append(vectors, mtaStsVector)
