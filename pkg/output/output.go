@@ -162,7 +162,11 @@ func (t *TerminalWriter) Write(f finding.Finding) error {
 			detail = fmt.Sprintf("tlsa %s dangling DANE pin", f.TLSAName)
 		}
 	case finding.VectorMTASTS:
-		detail = fmt.Sprintf("mta-sts policy host %s NXDOMAIN (dangling -> %s)", f.Service, f.CNAME)
+		if f.MTASTSMode != "" {
+			detail = fmt.Sprintf("mta-sts policy at %s is mode: %s (TLS enforcement inactive)", f.Service, f.MTASTSMode)
+		} else {
+			detail = fmt.Sprintf("mta-sts policy host %s NXDOMAIN (dangling -> %s)", f.Service, f.CNAME)
+		}
 	case finding.VectorBIMI:
 		detail = fmt.Sprintf("bimi asset host %s NXDOMAIN (dangling brand logo/VMC)", f.BIMIURIHost)
 	case finding.VectorDNSSEC:

@@ -1500,6 +1500,67 @@ README + POST_V01 updates. No new dependency.
 
 ---
 
+## Rank 28 — MTA-STS weak-policy mode detection (second `mtasts` sub-case) — ✅ IMPLEMENTED (Phase 2, Rotation 36)
+
+**Status:** Shipped. Rotation 36 extended the existing `mtasts` vector with a
+second sub-case: when the MTA-STS policy host resolves and the policy file is
+reachable, but its `mode:` field is `none` or `testing` (not `enforce`), TLS
+enforcement is inactive — the exact same disposition as DMARC `p=none` (Rank 15)
+applied to the SMTP-TLS surface. Both `mode: none` and `mode: testing` leave the
+domain vulnerable to active TLS-downgrade and MX-redirection attacks the protocol
+is specifically designed to prevent (RFC 8461 §3.2).
+
+**Changes:** `detectors.MTASTS` now runs in two sub-cases on every domain that
+publishes a `v=STSv1` TXT signal:
+
+1. **Dangling host** (existing, unchanged): policy host `mta-sts.<domain>` is
+   NXDOMAIN → `POTENTIAL` finding with `service`/`cname` fields.
+2. **Weak mode** (new): policy host resolves; `GET
+   https://mta-sts.<domain>/.well-known/mta-sts.txt` returns 200; `mode:` is
+   `none` or `testing` → `POTENTIAL` finding with `service`/`mtasts_mode` fields.
+   Indeterminate cases (HTTP error, timeout, TLS failure, non-200, no `mode:`
+   field, `mode: enforce`) produce no finding — the detector is biased toward
+   false negatives over false positives, consistent with the rest of graverobber.
+
+New `Finding` field: `MTASTSMode string` (`json:"mtasts_mode,omitempty"`). No new
+vector constant, no new CLI flag (covered by existing `--no-mtasts` opt-out).
+Output paths updated in lock-step: terminal renders `mta-sts policy at <host> is
+mode: <mode> (TLS enforcement inactive)`, CSV target column carries `<host>
+(mode: <mode>)`, SARIF detail line cites RFC 8461 §3.2. SARIF rule descriptor
+updated to cover both sub-cases.
+
+New functions in `pkg/detectors/mtasts.go`: `mtaStsFetchMode` (HTTPS GET with
+`InsecureSkipVerify`, 8 s timeout, 64 KiB body cap), `parseMTASTSMode` (RFC 8461
+§3.2 key:value line scanner), `mtaStsModeExplanation` (human-readable mode
+description for evidence strings).
+
+Guarded by 17 new tests in `pkg/detectors/mtasts_test.go`: `TestParseMTASTSMode`
+(11-case table: LF/CRLF, case, leading space, missing field, first-wins semantics),
+`TestMtaStsFetchMode_EnforceMode` / `_NoneMode` / `_TestingMode` (three
+`httptest.NewTLSServer` round-trips — InsecureSkipVerify in production client
+accepts the test cert without special config), `TestMtaStsFetchMode_HTTPNotFound`
+(404 → empty mode, no error), `TestMtaStsFetchMode_NoModeField` (200 but no
+`mode:` key → empty string), `TestMTASTS_WeakModeFindingFields` (finding shape
+validation: MTASTSMode set, CNAME empty, confidence POTENTIAL). All 28 `mtasts`
+tests pass; full suite green under `-race`.
+
+**Why this over TLSA HTTPS cert-mismatch / other candidates:** The Rank 35
+directive specified "CAA issuer-mismatch or MTA-STS policy check" and the
+TLSA HTTPS cert-mismatch was already shipped (Phase 2, Rotation 35). The
+MTA-STS weak-mode sub-case is the most natural remaining gap: it mirrors the
+DMARC `p=none` pattern exactly (an advertised protocol in a non-enforcing mode),
+requires no new dependency (standard library `net/http` + RFC-defined URL), and
+completes the MTA-STS vector's coverage from "host dangling" to "policy quality."
+
+**Schema:** one new `Finding` field (`MTASTSMode string`
+`json:"mtasts_mode,omitempty"`); no new vector constant, no new CLI flag.
+The existing `--no-mtasts` opt-out covers both sub-cases.
+
+**Complexity:** Low — two new detector helpers, one emit block, three output-path
+updates, 17 new tests, README + POST_V01 updates. No new dependency.
+
+---
+
 ## Non-goals (explicitly out of scope)
 
 - **WHOIS-based SPF include verification:** The SPF detector already uses DNS
@@ -1547,3 +1608,4 @@ README + POST_V01 updates. No new dependency.
 | 25 | DNSSEC weak/deprecated algorithm detection (RFC 8624) ✅ | Low-Med | High (completes DNSSEC coverage, forgeable chain of trust) | Yes (new field, no flag) |
 | 26 | NS partial-lame delegation detection (RFC 1912 §2.8) ✅ | Low | High (completes NS coverage, partial-hijack precondition when lame NS sits at a takeoverable provider) | No (2nd sub-case of `ns`, reuses field + flag) |
 | 27 | SPF deprecated `ptr` mechanism detection (RFC 7208 §5.5) ✅ | Low | Medium-High (completes SPF coverage, present-but-undefined-on-receivers — spoofable-by-omission under DMARC alignment) | Yes (new `SPFPtr` field, no flag — extends `spf`) |
+| 28 | MTA-STS weak-policy mode detection (`mode: none`/`testing`) ✅ | Low | High (completes MTA-STS coverage, same SMTP downgrade/MX-redirection risk as DMARC p=none) | Yes (new `MTASTSMode` field, no flag — 2nd sub-case of `mtasts`) |

@@ -163,9 +163,9 @@ var vectorRuleText = map[finding.Vector]struct {
 		"A DANE TLSA record (RFC 6698 / RFC 7672) at _25._tcp.<mxhost> pins the TLS certificate of a mail exchanger that is NXDOMAIN. Because DANE for SMTP mandates DNSSEC the stale pin is authenticated: it hard-fails inbound mail from every DANE-validating sender, and an attacker who reclaims the gone mail host can present a certificate matching the published association to be trusted by DANE senders — a DANE-blessed mail-interception path.",
 	},
 	finding.VectorMTASTS: {
-		"Dangling MTA-STS policy host",
-		"An MTA-STS policy is advertised but its policy host is NXDOMAIN.",
-		"A domain advertises SMTP MTA-STS (RFC 8461) via a \"v=STSv1\" TXT record at _mta-sts.<domain>, but its policy host mta-sts.<domain> — which serves the policy file at https://mta-sts.<domain>/.well-known/mta-sts.txt — is NXDOMAIN. An attacker who reclaims the dangling policy host can serve a forged policy that disables TLS enforcement (mode: none) or authorises an attacker-controlled MX, re-opening the active TLS-downgrade and mail-redirection attacks MTA-STS exists to close.",
+		"MTA-STS misconfiguration (dangling policy host or weak policy mode)",
+		"An MTA-STS policy is advertised but its policy host is NXDOMAIN, or the policy mode is not enforce.",
+		"A domain advertises SMTP MTA-STS (RFC 8461) via a \"v=STSv1\" TXT record at _mta-sts.<domain>. Two sub-cases are detected. (1) Dangling policy host: the policy host mta-sts.<domain> — which serves the policy file at https://mta-sts.<domain>/.well-known/mta-sts.txt — is NXDOMAIN; an attacker who reclaims the dangling host can serve a forged policy that disables TLS enforcement or redirects mail. (2) Weak policy mode: the policy host resolves and the policy file is reachable, but its mode: field is \"none\" or \"testing\" rather than \"enforce\" — TLS enforcement is absent (none) or advisory-only (testing), so SMTP senders are not required to enforce TLS and the domain remains vulnerable to active TLS-downgrade and MX-redirection attacks (RFC 8461 §3.2).",
 	},
 	finding.VectorBIMI: {
 		"Dangling BIMI asset host",
@@ -311,7 +311,11 @@ func sarifMessage(f finding.Finding) string {
 			detail = "DANE TLSA " + f.TLSAName + " dangling pin"
 		}
 	case finding.VectorMTASTS:
-		detail = fmt.Sprintf("MTA-STS policy host %s is NXDOMAIN (dangling — reclaimable target %s)", f.Service, f.CNAME)
+		if f.MTASTSMode != "" {
+			detail = fmt.Sprintf("MTA-STS policy at %s is mode: %s — TLS enforcement inactive, domain is vulnerable to SMTP downgrade and MX-redirection attacks", f.Service, f.MTASTSMode)
+		} else {
+			detail = fmt.Sprintf("MTA-STS policy host %s is NXDOMAIN (dangling — reclaimable target %s)", f.Service, f.CNAME)
+		}
 	case finding.VectorBIMI:
 		detail = fmt.Sprintf("BIMI asset host %s is NXDOMAIN (dangling — reclaimable to serve a forged brand logo/VMC)", f.BIMIURIHost)
 	case finding.VectorDNSSEC:

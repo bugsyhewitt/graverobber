@@ -164,8 +164,11 @@ func csvTarget(f finding.Finding) string {
 		}
 		return f.TLSAName
 	case finding.VectorMTASTS:
-		// The dangling policy host and the claimable target it points at are the
-		// actionable datum.
+		// Sub-case 2 (weak mode): the policy host is up but the mode is not enforce.
+		if f.MTASTSMode != "" {
+			return fmt.Sprintf("%s (mode: %s)", f.Service, f.MTASTSMode)
+		}
+		// Sub-case 1 (dangling host): the policy host is NXDOMAIN.
 		if f.CNAME != "" && f.CNAME != f.Service {
 			return fmt.Sprintf("%s -> %s (NXDOMAIN)", f.Service, f.CNAME)
 		}

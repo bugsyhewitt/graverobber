@@ -314,6 +314,22 @@ type Finding struct {
 	// NXDOMAIN and therefore reclaimable. The TLSRPT owner name is carried in
 	// Service.
 	TLSRPTURIHost string `json:"tlsrpt_uri_host,omitempty"`
+	// MTASTSMode is set for the weak-policy VectorMTASTS sub-case: the value of
+	// the "mode:" field in the MTA-STS policy file at
+	// https://mta-sts.<domain>/.well-known/mta-sts.txt when that mode is NOT
+	// "enforce". RFC 8461 §3.2 defines three modes:
+	//   - "enforce" (active TLS enforcement — the healthy state, not flagged)
+	//   - "testing" (monitor-only: TLS failures are reported but mail is delivered
+	//     regardless; SMTP senders may apply the policy but MUST NOT fail delivery)
+	//   - "none" (completely disabled: senders MUST treat the policy as absent;
+	//     this is the "turned off" state)
+	// Both "none" and "testing" are the same disposition class as DMARC p=none:
+	// TLS enforcement is not active, so the protection MTA-STS exists to provide
+	// is absent (for "none") or advisory-only (for "testing"). The field is empty
+	// for the dangling-host sub-case, which is identified instead by the CNAME
+	// field. The two sub-cases are distinguished by which of MTASTSMode (weak
+	// policy) or CNAME (dangling host) is set.
+	MTASTSMode string `json:"mtasts_mode,omitempty"`
 	// DNSSECWeakAlgs is set for the weak-algorithm VectorDNSSEC sub-case: the
 	// human-readable names of the deprecated/forbidden DNSSEC algorithms (or DS
 	// digest types) graverobber observed on the target's signed delegation, e.g.
