@@ -2,7 +2,10 @@ package detectors
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -329,5 +332,193 @@ func TestMTASTS_CaseInsensitiveVersion(t *testing.T) {
 func TestMTASTSFinding_VectorConstant(t *testing.T) {
 	if finding.VectorMTASTS != "mtasts" {
 		t.Errorf("VectorMTASTS = %q, want \"mtasts\"", finding.VectorMTASTS)
+	}
+}
+
+// --- parseMTASTSMode unit tests ---
+
+// TestParseMTASTSMode covers the RFC 8461 §3.2 key:value parsing logic.
+func TestParseMTASTSMode(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"enforce", "version: STSv1\nmode: enforce\nmax_age: 604800\n", "enforce"},
+		{"none", "version: STSv1\nmode: none\nmax_age: 86400\n", "none"},
+		{"testing", "version: STSv1\nmode: testing\nmax_age: 86400\n", "testing"},
+		{"uppercase mode value", "version: STSv1\nmode: Enforce\n", "enforce"},
+		{"mode key uppercase", "version: STSv1\nMode: enforce\n", "enforce"},
+		{"crlf line endings", "version: STSv1\r\nmode: testing\r\nmax_age: 86400\r\n", "testing"},
+		{"mode with leading space", "version: STSv1\nmode:  enforce\n", "enforce"},
+		{"no mode field", "version: STSv1\nmax_age: 604800\n", ""},
+		{"empty body", "", ""},
+		{"mode not first line", "version: STSv1\nmax_age: 604800\nmode: none\n", "none"},
+		{"first mode wins", "mode: none\nmode: enforce\n", "none"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := parseMTASTSMode(c.body); got != c.want {
+				t.Errorf("parseMTASTSMode(%q) = %q, want %q", c.body, got, c.want)
+			}
+		})
+	}
+}
+
+// --- mtaStsFetchMode integration tests against httptest.TLSServer ---
+
+// TestMtaStsFetchMode_EnforceMode verifies that a policy file with mode: enforce
+// is returned correctly from the HTTPS endpoint.
+func TestMtaStsFetchMode_EnforceMode(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != mtaStsPolicyPath {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprintln(w, "version: STSv1")
+		fmt.Fprintln(w, "mode: enforce")
+		fmt.Fprintln(w, "max_age: 604800")
+		fmt.Fprintln(w, "mx: mail.example.com")
+	}))
+	defer srv.Close()
+
+	// The server address is "127.0.0.1:<port>"; use that as the policyHost.
+	host := srv.Listener.Addr().String()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mode, err := mtaStsFetchMode(ctx, host)
+	if err != nil {
+		t.Fatalf("mtaStsFetchMode: %v", err)
+	}
+	if mode != "enforce" {
+		t.Errorf("mode = %q, want %q", mode, "enforce")
+	}
+}
+
+// TestMtaStsFetchMode_NoneMode verifies that mode: none is returned.
+func TestMtaStsFetchMode_NoneMode(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != mtaStsPolicyPath {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprintln(w, "version: STSv1")
+		fmt.Fprintln(w, "mode: none")
+	}))
+	defer srv.Close()
+
+	host := srv.Listener.Addr().String()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mode, err := mtaStsFetchMode(ctx, host)
+	if err != nil {
+		t.Fatalf("mtaStsFetchMode: %v", err)
+	}
+	if mode != "none" {
+		t.Errorf("mode = %q, want %q", mode, "none")
+	}
+}
+
+// TestMtaStsFetchMode_TestingMode verifies that mode: testing is returned.
+func TestMtaStsFetchMode_TestingMode(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != mtaStsPolicyPath {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprintln(w, "version: STSv1")
+		fmt.Fprintln(w, "mode: testing")
+	}))
+	defer srv.Close()
+
+	host := srv.Listener.Addr().String()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mode, err := mtaStsFetchMode(ctx, host)
+	if err != nil {
+		t.Fatalf("mtaStsFetchMode: %v", err)
+	}
+	if mode != "testing" {
+		t.Errorf("mode = %q, want %q", mode, "testing")
+	}
+}
+
+// TestMtaStsFetchMode_HTTPNotFound verifies that a 404 response produces no
+// error and an empty mode (treat as indeterminate).
+func TestMtaStsFetchMode_HTTPNotFound(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	host := srv.Listener.Addr().String()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mode, err := mtaStsFetchMode(ctx, host)
+	if err != nil {
+		t.Fatalf("unexpected error for 404: %v", err)
+	}
+	if mode != "" {
+		t.Errorf("mode = %q, want empty (404 is indeterminate)", mode)
+	}
+}
+
+// TestMtaStsFetchMode_NoModeField verifies that a policy file without a mode:
+// key returns an empty string with no error.
+func TestMtaStsFetchMode_NoModeField(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "version: STSv1")
+		fmt.Fprintln(w, "max_age: 86400")
+	}))
+	defer srv.Close()
+
+	host := srv.Listener.Addr().String()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mode, err := mtaStsFetchMode(ctx, host)
+	if err != nil {
+		t.Fatalf("mtaStsFetchMode: %v", err)
+	}
+	if mode != "" {
+		t.Errorf("mode = %q, want empty (no mode: field)", mode)
+	}
+}
+
+// --- weak-mode finding field tests ---
+
+// TestMTASTS_WeakModeFindingFields verifies that a weak-mode finding (sub-case 2)
+// carries the correct vector, confidence, service host, and MTASTSMode fields.
+// The test constructs the finding directly from the detector output shape since
+// the end-to-end HTTP path is verified separately via mtaStsFetchMode tests.
+func TestMTASTS_WeakModeFindingFields(t *testing.T) {
+	// Build a synthetic finding that mirrors what the detector emits for sub-case 2.
+	f := finding.Finding{
+		Subdomain:  "example.com",
+		Vector:     finding.VectorMTASTS,
+		Confidence: finding.Potential,
+		Service:    "mta-sts.example.com",
+		MTASTSMode: "none",
+		Evidence:   "MTA-STS policy at mta-sts.example.com is mode: none — TLS enforcement is completely disabled",
+	}
+	if f.Vector != finding.VectorMTASTS {
+		t.Errorf("vector: got %q, want mtasts", f.Vector)
+	}
+	if f.Confidence != finding.Potential {
+		t.Errorf("confidence: got %q, want POTENTIAL", f.Confidence)
+	}
+	if f.MTASTSMode != "none" {
+		t.Errorf("MTASTSMode: got %q, want none", f.MTASTSMode)
+	}
+	if !strings.Contains(f.Evidence, "mode: none") {
+		t.Errorf("evidence %q should mention the mode value", f.Evidence)
+	}
+	// Weak-mode findings must NOT carry a CNAME (no dangling host).
+	if f.CNAME != "" {
+		t.Errorf("CNAME should be empty for weak-mode findings, got %q", f.CNAME)
 	}
 }

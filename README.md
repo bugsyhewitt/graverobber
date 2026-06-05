@@ -28,7 +28,7 @@ a recon pipeline.
 | AXFR  | A delegated nameserver allows an unauthenticated zone transfer, leaking every record | Classic DNS misconfiguration; force-multiplier for every other vector |
 | CAA   | A `CAA` record names a CA domain that is NXDOMAIN and re-claimable, an `iodef` report host that is NXDOMAIN, **or** uses the `*` wildcard authorising any CA to issue | Missing/weak certificate-issuance control → man-in-the-middle TLS; or CAA report interception |
 | TLSA  | A DANE `TLSA` pin at `_25._tcp.<mxhost>` covers an MX host that is NXDOMAIN — a dangling, DNSSEC-authenticated pin | Hard-fails inbound mail from DANE senders; reclaimable mail host → DANE-trusted interception (RFC 7672) |
-| MTA-STS | An MTA-STS policy is advertised (`v=STSv1` TXT at `_mta-sts.<domain>`) but the policy host `mta-sts.<domain>` is NXDOMAIN and re-claimable | Reclaimed policy host serves a forged policy (`mode: none` disables TLS enforcement, or an attacker `mx:` list redirects mail) → TLS downgrade / mail interception (RFC 8461) |
+| MTA-STS | An MTA-STS policy is advertised (`v=STSv1` TXT at `_mta-sts.<domain>`) but **(a)** the policy host `mta-sts.<domain>` is NXDOMAIN and re-claimable, **or (b)** the policy host resolves but its `mode:` field is `none` or `testing` (not `enforce`) | (a) Reclaimed policy host serves a forged policy → TLS downgrade / mail interception. (b) TLS enforcement inactive — SMTP senders not required to enforce TLS; vulnerable to active-downgrade and MX-redirection attacks (RFC 8461 §3.2) |
 | BIMI | A BIMI record (`v=BIMI1` TXT at `default._bimi.<domain>`) names a logo (`l=`) or VMC (`a=`) URL whose host is NXDOMAIN and re-claimable | Reclaimed asset host serves a forged brand logo/VMC, displayed beside DMARC-passing mail → brand-impersonation phishing (BIMI spec) |
 | DNSSEC | The parent zone publishes a `DS` (Delegation Signer) record but the domain has **no `DNSKEY`** — an orphaned DS that breaks the chain of trust; **or** the chain is intact but uses a DNSSEC algorithm RFC 8624 forbids/deprecates (RSAMD5, DSA/SHA-1, RSASHA1, DSA-NSEC3-SHA1, RSASHA1-NSEC3-SHA1, ECC-GOST, or a SHA-1 DS digest) — a forgeable chain | Orphan: every validating resolver (Google, Cloudflare, Quad9, most ISPs) `SERVFAIL`s the whole zone → self-inflicted outage. Weak algorithm: a well-resourced attacker can forge a valid-looking DNSSEC chain, defeating DNSSEC entirely (RFC 4034, RFC 8624) |
 | TLSRPT | A TLSRPT record (`v=TLSRPTv1` TXT at `_smtp._tls.<domain>`) names a `rua=` report destination — a `mailto:` domain or `https:` collector host — that is NXDOMAIN and re-claimable | Reclaimed destination intercepts every SMTP-TLS failure report → delivery reconnaissance and a live view of the downgrade failures that would otherwise alert the owner (RFC 8460) |
@@ -262,7 +262,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-axfr` | false | Skip AXFR zone-transfer misconfiguration checks |
 | `--no-caa` | false | Skip CAA (Certification Authority Authorization) misconfiguration checks (dangling issuer, dangling `iodef` report host, permissive any-CA) |
 | `--no-tlsa` | false | Skip TLSA dangling-DANE-pin checks |
-| `--no-mtasts` | false | Skip MTA-STS dangling-policy-host checks |
+| `--no-mtasts` | false | Skip MTA-STS checks (dangling policy host + weak policy mode) |
 | `--no-bimi` | false | Skip BIMI dangling-asset-host checks |
 | `--no-dnssec` | false | Skip DNSSEC checks (orphaned DS, weak/deprecated algorithm per RFC 8624) |
 | `--no-tlsrpt` | false | Skip TLSRPT dangling-report-destination checks |
@@ -601,7 +601,7 @@ intentionally **not** flagged — only a present-but-orphaned pin is reported,
 keeping the vector low-noise. (A dangling MX host with *no* DANE pin is reported
 by the MX vector instead, not here.)
 
-### Dangling MTA-STS policy host (`--no-mtasts`)
+### MTA-STS misconfiguration (`--no-mtasts`)
 
 SMTP MTA Strict Transport Security (RFC 8461) lets a domain declare that sending
 mail servers **must** use TLS with a valid, matching certificate when delivering
@@ -615,21 +615,28 @@ opportunistic STARTTLS allows. A domain opts in with two coupled pieces:
   hosts and the enforcement mode. The policy host `mta-sts.<domain>` is, in
   practice, a `CNAME` to a hosting provider (a CDN bucket, a SaaS MTA-STS host).
 
-When the policy host is decommissioned — the provider resource is released, the
-hosted zone is deleted, the subdomain is retired — but the `_mta-sts` `TXT` signal
-is left behind, you get a **dangling MTA-STS policy host**. An attacker who
-reclaims `mta-sts.<domain>` can serve an arbitrary policy file: a forged
-`mode: none` disables TLS enforcement wholesale (re-opening the downgrade attack
-MTA-STS exists to close), and a forged `mx:` list authorises the attacker's own
-mail server, steering inbound mail through it under a policy senders trust.
+graverobber detects two sub-cases:
 
-graverobber resolves `_mta-sts.<target>`; if a `v=STSv1` policy signal is present
-it probes `mta-sts.<target>` for existence. A policy host that is NXDOMAIN is
-reported as a `POTENTIAL` `mtasts` finding, carrying the dangling policy host in
-`service` and the claimable `CNAME` target (or the policy host itself) in `cname`.
-A domain that does not advertise MTA-STS, or whose policy host still resolves, is
-the healthy case and is intentionally **not** flagged — only an advertised-but-
-orphaned policy host is reported.
+**Sub-case 1 — Dangling policy host.** When the policy host is decommissioned
+but the `_mta-sts` `TXT` signal is left behind, the policy host is NXDOMAIN and
+re-claimable. An attacker who reclaims `mta-sts.<domain>` can serve an arbitrary
+policy file: a forged `mode: none` disables TLS enforcement wholesale, and a
+forged `mx:` list authorises the attacker's own mail server, steering inbound mail
+through it. Finding carries the dangling policy host in `service` and the
+claimable `CNAME` target (or the policy host itself) in `cname`.
+
+**Sub-case 2 — Weak policy mode.** When the policy host resolves and the policy
+file is reachable, but its `mode:` field is `none` or `testing`, TLS enforcement
+is inactive — the same disposition as DMARC `p=none`. In `mode: none`, senders
+must treat the policy as absent (RFC 8461 §3.3); in `mode: testing`, senders may
+apply TLS but must not fail delivery on violations. Either mode leaves the domain
+vulnerable to active TLS-downgrade and MX-redirection attacks. Finding carries the
+policy host in `service` and the mode token in `mtasts_mode`. Upgrade to
+`mode: enforce` to activate protection.
+
+Both sub-cases emit a `POTENTIAL` `mtasts` finding. A domain that does not
+advertise MTA-STS, or whose policy host resolves and serves `mode: enforce`, is
+intentionally **not** flagged.
 
 ### Dangling BIMI asset host (`--no-bimi`)
 
@@ -829,6 +836,7 @@ JSONL — one finding per line:
 {"subdomain":"example.com","vector":"axfr","service":"ns1.example.com","confidence":"CONFIRMED","nameservers":["ns1.example.com"],"leaked_hosts":["admin.example.com","vpn.example.com"],"evidence":"nameserver ns1.example.com allowed unauthenticated AXFR (412 records leaked; sample: admin.example.com, vpn.example.com)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"tlsa","confidence":"POTENTIAL","mx_hosts":["mx.deleted-vendor.invalid"],"tlsa_name":"_25._tcp.mx.deleted-vendor.invalid","evidence":"DANE TLSA pin published at _25._tcp.mx.deleted-vendor.invalid but MX host mx.deleted-vendor.invalid is NXDOMAIN (dangling DANE pin — hard-fails inbound mail; reclaimable for DANE-trusted interception)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"mtasts","service":"mta-sts.example.com","confidence":"POTENTIAL","cname":"policy.deleted-vendor.invalid","evidence":"MTA-STS policy advertised at _mta-sts.example.com but policy host mta-sts.example.com is NXDOMAIN (dangling MTA-STS host — reclaimable to serve a forged policy that disables TLS enforcement or redirects mail)","timestamp":"2026-05-28T12:00:00Z"}
+{"subdomain":"example.com","vector":"mtasts","service":"mta-sts.example.com","confidence":"POTENTIAL","mtasts_mode":"testing","evidence":"MTA-STS policy at mta-sts.example.com is mode: testing — TLS enforcement is monitor-only (senders MAY apply TLS but MUST NOT fail delivery on violations); SMTP senders are not required to enforce TLS for mail destined to example.com, leaving the domain vulnerable to active-downgrade and MX-redirection attacks (RFC 8461 §3.2 — upgrade to mode: enforce to activate protection)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"bimi","service":"default._bimi.example.com","confidence":"POTENTIAL","bimi_uri_host":"images.deleted-vendor.invalid","evidence":"BIMI record at default._bimi.example.com l= asset host images.deleted-vendor.invalid is NXDOMAIN (dangling BIMI asset host — reclaimable to serve a forged brand logo/VMC beside DMARC-passing mail)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"example.com","vector":"dnssec","confidence":"POTENTIAL","ds_key_tags":[12345],"evidence":"parent zone publishes DS record(s) (key tag(s) 12345) but example.com has no DNSKEY — orphaned DS: DNSSEC-validating resolvers (Google, Cloudflare, Quad9, most ISPs) return SERVFAIL for the whole zone (self-inflicted outage; remove the DS at the registrar or re-sign the zone)","timestamp":"2026-05-28T12:00:00Z"}
 {"subdomain":"weak-dnssec.example.com","vector":"dnssec","confidence":"POTENTIAL","ds_key_tags":[12345],"dnssec_weak_algs":["RSASHA1"],"evidence":"DNSSEC delegation uses weak/deprecated algorithm(s) RSASHA1 (RFC 8624) — forgeable chain of trust; rotate to RSASHA256/RSASHA512/ECDSAP256SHA256/ECDSAP384SHA384/ED25519 and update the DS at the registrar","timestamp":"2026-05-28T12:00:00Z"}
