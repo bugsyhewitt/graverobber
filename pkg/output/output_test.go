@@ -249,6 +249,15 @@ func TestTerminalWriter_RendersDetailForEveryVector(t *testing.T) {
 			},
 			wantSub: []string{"example.com", "reports.gone.net", "tlsrpt"},
 		},
+		{
+			name: "autodiscover",
+			f: finding.Finding{
+				Subdomain: "example.com", Vector: finding.VectorAutodiscover,
+				Confidence: finding.Potential, Service: "autodiscover.example.com",
+				CNAME: "example.mail.dead-tenant.invalid",
+			},
+			wantSub: []string{"example.com", "autodiscover.example.com", "autodiscover"},
+		},
 	}
 
 	for _, tc := range cases {

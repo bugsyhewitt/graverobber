@@ -116,6 +116,7 @@ func TestCSV_TargetColumnPerVector(t *testing.T) {
 		{"dnssec", finding.Finding{Vector: finding.VectorDNSSEC, DSKeyTags: []uint16{12345}}, "orphaned DS key tag 12345 (no child DNSKEY)"},
 		{"dnssec-weak-algorithm", finding.Finding{Vector: finding.VectorDNSSEC, DSKeyTags: []uint16{12345}, DNSSECWeakAlgs: []string{"RSASHA1"}}, "weak DNSSEC algorithm(s) RSASHA1 (RFC 8624 deprecated)"},
 		{"tlsrpt", finding.Finding{Vector: finding.VectorTLSRPT, Service: "_smtp._tls.example.com", TLSRPTURIHost: "reports.gone.net"}, "reports.gone.net (NXDOMAIN)"},
+		{"autodiscover", finding.Finding{Vector: finding.VectorAutodiscover, Service: "autodiscover.example.com", CNAME: "example.mail.dead-tenant.invalid"}, "autodiscover.example.com -> example.mail.dead-tenant.invalid (NXDOMAIN)"},
 	}
 	ti := colIndex(t, "target")
 	for _, tc := range cases {

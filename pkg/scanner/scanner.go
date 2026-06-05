@@ -23,25 +23,26 @@ import (
 
 // Options configures a scan run.
 type Options struct {
-	Concurrency   int           // worker goroutine count (handoff default: 50)
-	Timeout       time.Duration // per-target HTTP timeout (handoff default: 10s)
-	RateLimit     int           // global requests/sec; 0 == unlimited
-	NoNS          bool          // skip the NS takeover vector
-	NoSPF         bool          // skip the SPF include vector
-	NoMX          bool          // skip the MX takeover vector
-	NoDKIM        bool          // skip the DKIM selector vector
-	NoDMARC       bool          // skip the DMARC report-domain vector
-	NoAXFR        bool          // skip the AXFR zone-transfer vector
-	NoCAA         bool          // skip the CAA misconfiguration vector
-	NoTLSA        bool          // skip the TLSA dangling-DANE-pin vector
-	NoMTASTS      bool          // skip the MTA-STS dangling-policy-host vector
-	NoBIMI        bool          // skip the BIMI dangling-asset-host vector
-	NoDNSSEC      bool          // skip the DNSSEC orphaned-DS vector
-	NoTLSRPT      bool          // skip the TLSRPT dangling-report-destination vector
-	HTTPOnly      bool          // probe services over HTTP only
-	HTTPSOnly     bool          // probe services over HTTPS only
-	Resolvers     []string      // custom recursive DNS resolvers
-	DKIMSelectors []string      // override the default DKIM selector probe list
+	Concurrency    int           // worker goroutine count (handoff default: 50)
+	Timeout        time.Duration // per-target HTTP timeout (handoff default: 10s)
+	RateLimit      int           // global requests/sec; 0 == unlimited
+	NoNS           bool          // skip the NS takeover vector
+	NoSPF          bool          // skip the SPF include vector
+	NoMX           bool          // skip the MX takeover vector
+	NoDKIM         bool          // skip the DKIM selector vector
+	NoDMARC        bool          // skip the DMARC report-domain vector
+	NoAXFR         bool          // skip the AXFR zone-transfer vector
+	NoCAA          bool          // skip the CAA misconfiguration vector
+	NoTLSA         bool          // skip the TLSA dangling-DANE-pin vector
+	NoMTASTS       bool          // skip the MTA-STS dangling-policy-host vector
+	NoBIMI         bool          // skip the BIMI dangling-asset-host vector
+	NoDNSSEC       bool          // skip the DNSSEC orphaned-DS vector
+	NoTLSRPT       bool          // skip the TLSRPT dangling-report-destination vector
+	NoAutodiscover bool          // skip the autodiscover/autoconfig dangling-host vector
+	HTTPOnly       bool          // probe services over HTTP only
+	HTTPSOnly      bool          // probe services over HTTPS only
+	Resolvers      []string      // custom recursive DNS resolvers
+	DKIMSelectors  []string      // override the default DKIM selector probe list
 
 	// MinConfidence, when set, suppresses any finding weaker than this tier:
 	// CONFIRMED ≥ LIKELY ≥ POTENTIAL. The empty value (the default) emits every
@@ -186,6 +187,9 @@ var (
 	tlsRptVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
 		return detectors.TLSRPT(ctx, target, s.resolver)
 	}
+	autodiscoverVector vectorFunc = func(ctx context.Context, s *Scanner, target string) ([]finding.Finding, error) {
+		return detectors.Autodiscover(ctx, target, s.resolver)
+	}
 )
 
 // scanTarget runs the per-target detection pipeline and emits any findings.
@@ -202,7 +206,7 @@ var (
 // as before, so output semantics are unchanged.
 func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.Map, out chan<- finding.Finding) {
 	// Select the enabled vectors. CNAME always runs; NS, SPF, MX, DKIM, DMARC,
-	// AXFR, CAA, TLSA, MTA-STS, BIMI, DNSSEC, and TLSRPT are opt-out.
+	// AXFR, CAA, TLSA, MTA-STS, BIMI, DNSSEC, TLSRPT, and Autodiscover are opt-out.
 	vectors := []vectorFunc{cnameVector}
 	if !s.opts.NoNS {
 		vectors = append(vectors, nsVector)
@@ -239,6 +243,9 @@ func (s *Scanner) scanTarget(ctx context.Context, target string, emitted *sync.M
 	}
 	if !s.opts.NoTLSRPT {
 		vectors = append(vectors, tlsRptVector)
+	}
+	if !s.opts.NoAutodiscover {
+		vectors = append(vectors, autodiscoverVector)
 	}
 
 	// Fan out: run each enabled vector concurrently, collecting findings into a
