@@ -144,8 +144,8 @@ var vectorRuleText = map[finding.Vector]struct {
 	},
 	finding.VectorDMARC: {
 		"DMARC policy weakness or dangling report host",
-		"A DMARC policy is monitor-only (p=none) or names a claimable report host (a mailto: domain or https: collector).",
-		"A DMARC policy is either p=none (monitor-only: receivers take no action on a failed DMARC check, so spoofed mail that fails SPF/DKIM is still delivered — the precondition for business-email-compromise and phishing) or its rua/ruf report URI points at an NXDOMAIN host — a mailto: address domain or an https: collector host, the two transports RFC 7489 §A.5 registers (an attacker who claims it intercepts every DMARC aggregate/forensic report sent for the domain).",
+		"A DMARC policy is monitor-only (p=none), has a weak subdomain policy (sp=none with enforcing parent), or names a claimable report host.",
+		"A DMARC policy is either p=none (monitor-only: receivers take no action on a failed DMARC check, so spoofed mail that fails SPF/DKIM is still delivered), or sp=none with an enforcing parent p= (all subdomains spoofable despite apex enforcement — split-enforcement misconfiguration, RFC 7489 §6.3), or its rua/ruf report URI points at an NXDOMAIN host — a mailto: address domain or an https: collector host (an attacker who claims it intercepts every DMARC aggregate/forensic report).",
 	},
 	finding.VectorAXFR: {
 		"Unauthenticated DNS zone transfer (AXFR)",
@@ -291,6 +291,8 @@ func sarifMessage(f finding.Finding) string {
 		switch {
 		case f.DMARCPolicy != "":
 			detail = "DMARC policy p=" + f.DMARCPolicy + " (monitor-only)"
+		case f.DMARCSubdomainPolicy != "":
+			detail = "DMARC sp=" + f.DMARCSubdomainPolicy + " (subdomains spoofable — parent policy enforcing)"
 		case f.DMARCURI != "":
 			detail = "DMARC rua/ruf:" + f.DMARCURI
 		}

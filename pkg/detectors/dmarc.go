@@ -3,6 +3,7 @@ package detectors
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 
@@ -10,8 +11,9 @@ import (
 	"github.com/bugsyhewitt/graverobber/pkg/resolver"
 )
 
-// DMARC detects two DMARC weaknesses on a domain: a dangling reporting-address
-// domain, and a monitor-only (p=none) policy.
+// DMARC detects three DMARC weaknesses on a domain: a dangling reporting-address
+// domain, a monitor-only (p=none) parent policy, and a weak subdomain policy
+// (sp=none when the parent policy is p=reject or p=quarantine).
 //
 // DMARC policy records live at _dmarc.<domain> as a TXT record and carry a
 // mandatory policy tag plus two optional reporting URIs:
@@ -54,13 +56,28 @@ import (
 // SPF/DKIM/DMARC alignment. The DMARC vectors were documented in the
 // SubdoMailing (Guardio Labs, 2024) and Hazy Hawk campaigns.
 //
+// Weak-subdomain-policy sub-case (new in Rotation 37). RFC 7489 §6.3 defines
+// the optional sp= tag as an explicit override of the parent p= policy for all
+// subdomains. When sp=none is set and the parent p= is "reject" or "quarantine",
+// the parent domain is fully protected but every subdomain is freely spoofable:
+// mail from <user>@<subdomain>.<target> passes DMARC alignment only against the
+// subdomain's own DMARC record (if it has one), and in the absence of one inherits
+// the sp=none policy — meaning no action is taken on failures. This is the "split
+// enforcement" misconfiguration: a domain appears DMARC-protected at the apex but
+// all subdomains remain spoofable, which is the precondition for subdomain
+// phishing and business-email-compromise attacks targeting an organisation's
+// subdomain namespace. The finding carries the sp= tag value in
+// DMARCSubdomainPolicy; the parent enforcement policy is included in Evidence.
+//
 // Algorithm:
 //  1. Resolve TXT records at _dmarc.<target>; extract the DMARC policy.
 //  2. Parse the p= tag; if it is "none" emit a Potential weak-policy finding.
-//  3. Parse the rua= and ruf= tags; split comma-separated URIs.
-//  4. For each mailto: URI, extract the domain to the right of the "@"; for each
+//  3. Parse the sp= tag; if it is "none" and p= is "reject" or "quarantine",
+//     emit a Potential weak-subdomain-policy finding.
+//  4. Parse the rua= and ruf= tags; split comma-separated URIs.
+//  5. For each mailto: URI, extract the domain to the right of the "@"; for each
 //     https:/http: URI, extract the URL authority host.
-//  5. Probe the host with CNAMEChain; ErrNXDomain means it is claimable —
+//  6. Probe the host with CNAMEChain; ErrNXDomain means it is claimable —
 //     emit a Potential dangling-report-host finding (DNS-only signal, no
 //     fingerprint match, consistent with the SPF vector's classification).
 func DMARC(ctx context.Context, target string, r *resolver.Resolver) ([]finding.Finding, error) {
@@ -76,9 +93,11 @@ func DMARC(ctx context.Context, target string, r *resolver.Resolver) ([]finding.
 
 	var findings []finding.Finding
 
+	policy := dmarcPolicy(record)
+
 	// Weak-policy sub-case: p=none is monitor-only (no enforcement). It is keyed
 	// on the target itself, not a report domain, so it is emitted once per record.
-	if policy := dmarcPolicy(record); policy == "none" {
+	if policy == "none" {
 		hasReporting := len(dmarcReportHosts(record)) > 0
 		evidence := "DMARC policy is p=none (monitor-only — spoofed mail is delivered)"
 		if !hasReporting {
@@ -91,6 +110,27 @@ func DMARC(ctx context.Context, target string, r *resolver.Resolver) ([]finding.
 			DMARCPolicy: policy,
 			Evidence:    evidence,
 		})
+	}
+
+	// Weak-subdomain-policy sub-case: sp=none overrides the parent enforcement
+	// policy for all subdomains. Only fires when the parent policy is enforcing
+	// (p=reject or p=quarantine) — if p=none the parent-policy finding already
+	// covers the domain and its subdomains.
+	if policy == "reject" || policy == "quarantine" {
+		if sp := dmarcSubdomainPolicy(record); sp == "none" {
+			findings = append(findings, finding.Finding{
+				Subdomain:            target,
+				Vector:               finding.VectorDMARC,
+				Confidence:           finding.Potential,
+				DMARCSubdomainPolicy: sp,
+				Evidence: fmt.Sprintf(
+					"DMARC parent policy is p=%s (enforcing) but sp=none overrides "+
+						"it for all subdomains — every subdomain is freely spoofable "+
+						"(mail from <user>@<subdomain>.%s is not DMARC-protected)",
+					policy, target,
+				),
+			})
+		}
 	}
 
 	hosts := dmarcReportHosts(record)
@@ -121,13 +161,30 @@ func DMARC(ctx context.Context, target string, r *resolver.Resolver) ([]finding.
 // dmarcPolicy returns the lower-cased value of the p= tag from a DMARC record,
 // or "" when no p= tag is present. The match is case-insensitive on the tag name
 // and value (RFC 7489 tags are case-insensitive in practice). Only the top-level
-// p= is read; the subdomain-policy sp= tag is intentionally ignored — graverobber
-// scans concrete hosts, so the policy that governs the scanned name is p=.
+// p= is read; dmarcSubdomainPolicy handles the sp= tag separately.
 func dmarcPolicy(record string) string {
 	for _, tag := range strings.Split(record, ";") {
 		tag = strings.TrimSpace(tag)
 		lower := strings.ToLower(tag)
 		if v, ok := strings.CutPrefix(lower, "p="); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// dmarcSubdomainPolicy returns the lower-cased value of the sp= tag from a
+// DMARC record, or "" when no sp= tag is present. RFC 7489 §6.3 defines sp=
+// as an optional override of the parent p= policy that applies specifically to
+// subdomains. When sp= is absent, subdomains inherit the parent p= policy.
+// When sp=none is explicit, every subdomain is monitor-only regardless of the
+// parent p= value — which is the "split enforcement" misconfiguration this
+// helper is used to detect.
+func dmarcSubdomainPolicy(record string) string {
+	for _, tag := range strings.Split(record, ";") {
+		tag = strings.TrimSpace(tag)
+		lower := strings.ToLower(tag)
+		if v, ok := strings.CutPrefix(lower, "sp="); ok {
 			return strings.TrimSpace(v)
 		}
 	}
