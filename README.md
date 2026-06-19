@@ -956,6 +956,35 @@ The CLI in `cmd/graverobber` is itself just a thin wrapper over `Scanner.Run`.
 
 ---
 
+## MCP server (agent-native interface)
+
+`graverobber` ships a **Model Context Protocol** server, `graverobber-mcp`, so an
+LLM agent (Claude Code, a Pho3nix sidecar, the MCP Inspector) can drive the
+engine directly. It is the Go reference server for the `necromancer-mcp` contract
+(suite packet P20-01). The CLI and the MCP server are two front ends over the
+same engine — no detection logic is duplicated.
+
+```bash
+make mcp                 # build bin/graverobber-mcp
+bin/graverobber-mcp      # stdio (default); NMC_TRANSPORT=http for Streamable HTTP
+make mcp-test            # the three test tiers (conformance + unit/hygiene + detect→confirm smoke)
+```
+
+Tools exposed: `scan_takeover` (safe), `confirm_takeover` **[active, gated:
+requires `confirm=true`]**, `list_fingerprints` (safe), plus a read-only
+`fingerprints://can-i-take-over-xyz` resource. Findings are emitted as structured
+content conforming to the suite interim `Finding` schema. The `confirm_takeover`
+probe is **read-only** — it confirms a takeover (S3 `NoSuchBucket`, GitHub Pages
+repo 404, Azure NXDOMAIN) but never claims the resource.
+
+Streamable HTTP binds **loopback by default**; a routable bind **requires a
+bearer token**. See [`cmd/graverobber-mcp/README.md`](cmd/graverobber-mcp/README.md)
+for the full contract, the safety D-rules, the Pho3nix catalog manifest
+(`mcp.catalog.json`), and the < 30-line recipe for adding an MCP server to
+another tool.
+
+---
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

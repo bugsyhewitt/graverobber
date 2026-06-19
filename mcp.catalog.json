@@ -1,0 +1,12 @@
+{
+  "name": "graverobber",
+  "summary": "Subdomain takeover detection + read-only claim-confirmation across CNAME/NS/SPF/MX/DKIM/DMARC and 8 more DNS vectors.",
+  "command": ["graverobber-mcp"],
+  "transport": "stdio",
+  "tags": ["recon", "web", "takeover", "dns", "email-auth"],
+  "active_tools": ["confirm_takeover"],
+  "tools": ["scan_takeover", "confirm_takeover", "list_fingerprints"],
+  "resources": ["fingerprints://can-i-take-over-xyz"],
+  "version": "1.0.1",
+  "schema": "nmc.catalog/v0"
+}

@@ -1,0 +1,17 @@
+{
+  "protocol_check": "mcp-inspector tools/list (2025-11-25)",
+  "tools": [
+    {
+      "name": "confirm_takeover",
+      "has_input_schema": true
+    },
+    {
+      "name": "list_fingerprints",
+      "has_input_schema": true
+    },
+    {
+      "name": "scan_takeover",
+      "has_input_schema": true
+    }
+  ]
+}

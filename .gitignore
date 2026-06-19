@@ -1,5 +1,8 @@
 # Binaries (compiled output at repo root; cmd/ source tree is not excluded)
 /graverobber
+/graverobber-mcp
+# Makefile build output directory (compiled binaries; never committed)
+/bin/
 *.exe
 *.exe~
 *.dll
