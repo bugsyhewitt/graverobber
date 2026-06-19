@@ -1,0 +1,27 @@
+{
+  "project": "graverobber",
+  "note": "Surfaced for Bugsy per Packet 07 §13. NOT applied autonomously; does NOT unpause the rotation.",
+  "v0_1_clause": {
+    "packet": "p20-07-graverobber-takeover",
+    "title": "Multi-signal takeover detection + safe claim-confirmation",
+    "criteria": [
+      "Multi-signal detection only — no single-fingerprint findings (a fingerprint match requires an independent NXDOMAIN or TLS-mismatch signal; pkg/engine, D2).",
+      "A working safe claim-confirmation for >=1 provider with mandatory release and blast-radius characterization (pkg/confirm + the GitHub Pages reference adapter, dry-run by default; D3/D8).",
+      "NS treated as a distinct critical class (rule=takeover.ns.<provider>, severity critical; pkg/engine/ns.go, D7).",
+      "The Packet-05 evidence invariant holds: no served-and-reflected canary, no `confirmed` (pkg/confirm.TestConfirm_EvidenceInvariant).",
+      "The precision guard holds: a fingerprint match with no independent signal is NOT detected (pkg/engine.TestFingerprintAloneIsNotDetected)."
+    ],
+    "delivered": {
+      "multi_signal_detection": true,
+      "safe_confirmation_min_one_provider": "github-pages (reference adapter, dry-run by default)",
+      "ns_critical_class": true,
+      "blast_radius": true,
+      "fingerprint_db_augmentation_and_sync": true
+    },
+    "deferred_to_operator": [
+      "Live claim execution: the live GitHub Pages adapter requires the operator's own credentials AND a wired GitHubOps client AND explicit authorization. graverobber does NOT perform a real provider registration autonomously (out-of-scope, irreversible, external-party exposure). See TAKEOVER.md.",
+      "Additional live claim adapters (S3, Heroku, Netlify, Vercel, Fastly) — the claim_adapter keys are registered in augment.json and the interface is ready; live implementations are a per-provider rotation lap, each proven against an owned dangling fixture.",
+      "NS zone-claim adapters — higher-risk; ship only where the provider supports clean create/delete."
+    ]
+  }
+}

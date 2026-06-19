@@ -1,0 +1,28 @@
+{
+  "project": "graverobber",
+  "packet": "p20-07-graverobber-takeover",
+  "open": [
+    {
+      "id": "gr07-live-claim-scope",
+      "category": "scope_boundary",
+      "raised_at": "2026-06-19",
+      "issue": "Packet 07's headline is actively claiming real resources on real third-party providers (GitHub/S3/Heroku) bound to a target's dangling DNS. That is irreversible and exposes the operation to external parties (a LOCKED LEVER), cannot be exercised headlessly, and contradicts the existing repo's stated scope ('graverobber never attempts to claim a resource'). The confirmer state machine, release discipline, evidence invariant, blast radius, and the GitHub Pages reference adapter are all built and fully tested in DRY-RUN; the live adapter is double-gated and refuses to register anything autonomously.",
+      "recommendation": "Bugsy decides whether/when to arm live confirmation. To enable: wire a GitHubOps client (e.g. go-github), supply operator credentials, pass --authorized + --allow-apex, and run ONLY against owned/authorized targets. Until then graverobber confirms in dry-run and leaves real findings `detected`."
+    },
+    {
+      "id": "gr07-providers-without-live-adapter",
+      "category": "coverage",
+      "raised_at": "2026-06-19",
+      "issue": "claim_adapter keys are registered in augment.json for github-pages, s3, heroku, netlify, vercel, fastly, fly, surge, readthedocs, bitbucket, and azure, and the ClaimAdapter interface is ready, but only github-pages has an adapter implementation (dry-run reference). A finding for any other provider is left `detected` with 'no claim adapter' (honest, not a false confirm).",
+      "recommendation": "Implement the remaining live claim adapters one provider per rotation lap, each proven against an owned dangling fixture (the Claim/ServeCanary/Release shape is fixed by the reference adapter, D9)."
+    },
+    {
+      "id": "gr07-ns-zone-claim",
+      "category": "coverage",
+      "raised_at": "2026-06-19",
+      "issue": "The NS-takeover critical class (takeover.ns.<provider>) is detected and promoted, but NS confirmation (registering the zone, adding a canary TXT, proving, releasing) is not implemented — zone-claim adapters are higher-risk and provider-specific.",
+      "recommendation": "Add NS zone-claim adapters only for providers with a clean create/delete; otherwise leave NS findings `detected` with manual-validation guidance."
+    }
+  ],
+  "resolved": []
+}

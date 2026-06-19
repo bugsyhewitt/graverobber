@@ -378,5 +378,26 @@ type Finding struct {
 	// Evidence is a short human-readable explanation of the underlying signal.
 	Evidence string `json:"evidence,omitempty"`
 
+	// Rule is the stable machine identifier for the takeover class this finding
+	// belongs to, used by the active confirmation pipeline and downstream
+	// enrichment/reporting. It follows the form "takeover.<service>" for a CNAME
+	// content takeover (e.g. "takeover.github-pages") and "takeover.ns.<provider>"
+	// for the higher-severity dangling-NS delegation class (e.g.
+	// "takeover.ns.route53"). It is set on the active (engine-produced) findings;
+	// the legacy per-vector scanner leaves it empty, so it serializes only when
+	// present and never alters the v1.0 finding shape.
+	Rule string `json:"rule,omitempty"`
+	// State is the takeover lifecycle state (detected / confirmed /
+	// not_vulnerable). Empty on legacy detection-only findings; set by the engine
+	// detector (detected) and advanced by the confirmer.
+	State State `json:"state,omitempty"`
+	// Severity is the impact class: "high" for a CNAME content takeover,
+	// "critical" for a whole-zone dangling-NS takeover. Empty on legacy findings.
+	Severity Severity `json:"severity,omitempty"`
+	// Confirmation, when non-nil, carries the result of an active safe-claim
+	// confirmation attempt: the served-canary evidence (the proof), reproduction,
+	// blast radius, and release status. Nil for a detection-only finding.
+	Confirmation *Confirmation `json:"confirmation,omitempty"`
+
 	Timestamp time.Time `json:"timestamp"`
 }

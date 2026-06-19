@@ -163,6 +163,9 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newUpdateCmd())
 	root.AddCommand(newCTCmd())
 	root.AddCommand(newLinksCmd())
+	root.AddCommand(newScanTakeoverCmd())
+	root.AddCommand(newConfirmTakeoverCmd())
+	root.AddCommand(newListFingerprintsCmd())
 	return root
 }
 
@@ -414,6 +417,15 @@ func loadDB(_ context.Context, f *cliFlags) (*fingerprints.DB, error) {
 			return nil, fmt.Errorf("load --fingerprints %s: %w", path, err)
 		}
 		db.Merge(extra)
+	}
+
+	// Apply graverobber's claim-adapter augmentations (D1): the synced/cached
+	// upstream fingerprints carry no claim_adapter, so re-apply the embedded
+	// side-file at load. This keeps the cache file pure-upstream (a `graverobber
+	// update` never has to preserve graverobber-written fields) while every loaded
+	// DB still knows which services have a safe claim adapter.
+	if err := fingerprints.ApplyAugment(db); err != nil {
+		return nil, fmt.Errorf("apply claim-adapter augmentations: %w", err)
 	}
 	return db, nil
 }

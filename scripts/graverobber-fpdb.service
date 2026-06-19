@@ -1,0 +1,11 @@
+# ~/.config/systemd/user/graverobber-fpdb.service  (Packet 07 Appendix A)
+#
+# One-shot service the graverobber-fpdb.timer triggers: refresh the takeover
+# fingerprint database from upstream. Set GRAVEROBBER_BIN if graverobber is not
+# on PATH for the user unit's environment.
+[Unit]
+Description=Refresh graverobber takeover fingerprint DB from can-i-take-over-xyz
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env graverobber update

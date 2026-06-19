@@ -29,6 +29,17 @@ import (
 var seed []byte
 
 // Fingerprint is a single service signature.
+//
+// Service, CNAME, Fingerprint, NXDomain, Status, and Discussion mirror the
+// upstream can-i-take-over-xyz fingerprints.json schema. ClaimAdapter is
+// graverobber's own addition: it names the per-provider claim adapter
+// (pkg/confirm) that can SAFELY confirm a takeover of this service — claim the
+// dangling resource, serve a canary, prove control, release. It is supplied by
+// graverobber's augment.json side-file (ApplyAugment), never by upstream, so a
+// `graverobber update` that re-pulls upstream fingerprints never clobbers it. A
+// service with an empty ClaimAdapter has no safe confirmation adapter yet and is
+// left at `detected` with manual-validation guidance (honest, not a false
+// confirm).
 type Fingerprint struct {
 	Service     string   `json:"service"`
 	CNAME       []string `json:"cname"`
@@ -36,6 +47,10 @@ type Fingerprint struct {
 	NXDomain    bool     `json:"nxdomain"`
 	Status      string   `json:"status"`
 	Discussion  string   `json:"discussion"`
+	// ClaimAdapter is the graverobber-added pkg/confirm adapter key that can
+	// safely confirm this service's takeover, e.g. "github-pages". Sourced from
+	// augment.json (D1), preserved across upstream syncs.
+	ClaimAdapter string `json:"claim_adapter,omitempty"`
 }
 
 // DB is an in-memory fingerprint database.

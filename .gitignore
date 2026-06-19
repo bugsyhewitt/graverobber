@@ -1,5 +1,6 @@
 # Binaries (compiled output at repo root; cmd/ source tree is not excluded)
 /graverobber
+/bin/
 *.exe
 *.exe~
 *.dll

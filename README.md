@@ -240,6 +240,55 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 
 ---
 
+## Takeover confirmation (`scan-takeover` / `confirm-takeover`)
+
+Every takeover scanner stops at a fingerprint match and emits "potential
+takeover" — which a bug-bounty program closes as unproven. graverobber adds the
+step they skip: **multi-signal detection** (to kill false positives) and **safe
+claim-confirmation** (to prove the takeover with a served canary). Full design and
+the deliberate dry-run scope boundary are in [`TAKEOVER.md`](TAKEOVER.md).
+
+**`scan-takeover` — multi-signal detection (safe, no claiming).** A candidate is
+reported only when a provider fingerprint match is corroborated by an *independent
+unclaimed-backend signal* (the CNAME target is NXDOMAIN, or the TLS certificate is
+absent / default-provider / mismatched). A bare fingerprint match on a live, owned
+backend is **suppressed** — the precision that separates graverobber from
+fingerprint-only tools.
+
+```console
+$ graverobber scan-takeover -l subdomains.txt --json
+{"subdomain":"assets.example.com","vector":"cname","service":"GitHub Pages",
+ "rule":"takeover.github-pages","state":"detected","severity":"high","confidence":"CONFIRMED",
+ "evidence":"signals aligned: [fingerprint:GitHub Pages] [cname-target-nxdomain:assets.github.io] [tls:default-or-mismatched-cert]", ...}
+# A host that matched the fingerprint but has a live, owned backend (one signal) is NOT reported.
+```
+
+**`confirm-takeover` — safe claim-confirmation (gated; dry-run by default).** The
+EdOverflow technique automated: claim the dangling resource into *your own*
+provider account, serve a unique canary on a hidden `/.well-known/nmc-<id>` path,
+prove control by fetching the FQDN, characterize the blast radius (shared cookies,
+OAuth `redirect_uri`, ACME), and **release** the resource. Only a
+served-and-reflected canary yields `confirmed`.
+
+```console
+$ graverobber confirm-takeover --target assets.example.com --service github-pages \
+    --authorized --allow-apex example.com --json
+# -> state:confirmed, evidence:"served canary ... at https://assets.example.com/.well-known/nmc-... ; resource released"
+```
+
+> **Safety.** Confirmation is the most sensitive action in the suite. It is gated
+> (`--authorized`) and scoped (`--allow-apex`), and runs in **dry-run by default**
+> (the claim/serve/prove/release lifecycle is simulated in-memory). A real claim
+> additionally requires a wired live adapter and the operator's own credentials —
+> graverobber does **not** perform a real provider registration autonomously, and
+> only ever against targets you own or are authorized to test. Dangling **NS**
+> delegations are treated as a distinct **critical** class
+> (`takeover.ns.<provider>`, whole-zone control).
+
+`list-fingerprints --claimable` shows which services have a safe claim adapter.
+
+---
+
 ## Flags
 
 | Flag | Default | Description |

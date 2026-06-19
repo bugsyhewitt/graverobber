@@ -1,0 +1,46 @@
+[
+  {
+    "service": "GitHub Pages",
+    "claim_adapter": "github-pages"
+  },
+  {
+    "service": "AWS/S3",
+    "claim_adapter": "s3"
+  },
+  {
+    "service": "Heroku",
+    "claim_adapter": "heroku"
+  },
+  {
+    "service": "Netlify",
+    "claim_adapter": "netlify"
+  },
+  {
+    "service": "Vercel",
+    "claim_adapter": "vercel"
+  },
+  {
+    "service": "Fastly",
+    "claim_adapter": "fastly"
+  },
+  {
+    "service": "Fly.io",
+    "claim_adapter": "fly"
+  },
+  {
+    "service": "Surge.sh",
+    "claim_adapter": "surge"
+  },
+  {
+    "service": "Read the Docs",
+    "claim_adapter": "readthedocs"
+  },
+  {
+    "service": "Bitbucket",
+    "claim_adapter": "bitbucket"
+  },
+  {
+    "service": "Microsoft Azure",
+    "claim_adapter": "azure"
+  }
+]
