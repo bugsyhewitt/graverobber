@@ -15,24 +15,24 @@ import (
 // unrecognised provider is Potential (the mail host is still NXDOMAIN, but we
 // cannot confirm re-claimability without further research).
 var knownMailProviders = []string{
-	"google.com",           // Google Workspace / Gmail MX
-	"googlemail.com",       // Google legacy MX
-	"outlook.com",          // Microsoft 365
-	"protection.outlook.com", // Microsoft 365 EOP
+	"google.com",                  // Google Workspace / Gmail MX
+	"googlemail.com",              // Google legacy MX
+	"outlook.com",                 // Microsoft 365
+	"protection.outlook.com",      // Microsoft 365 EOP
 	"mail.protection.outlook.com", // Microsoft 365 EOP (subdomain form)
-	"sendgrid.net",         // Twilio SendGrid
-	"mailgun.org",          // Mailgun
-	"amazonses.com",        // Amazon SES
-	"mimecast.com",         // Mimecast
-	"proofpoint.com",       // Proofpoint
-	"pphosted.com",         // Proofpoint hosted
-	"messagelabs.com",      // Symantec/Broadcom
-	"barracuda.com",        // Barracuda
-	"barracudanetworks.com", // Barracuda
-	"fastmail.com",         // Fastmail
-	"zoho.com",             // Zoho Mail
-	"mailhostbox.com",      // MailHostBox
-	"emailsrvr.com",        // Rackspace Email
+	"sendgrid.net",                // Twilio SendGrid
+	"mailgun.org",                 // Mailgun
+	"amazonses.com",               // Amazon SES
+	"mimecast.com",                // Mimecast
+	"proofpoint.com",              // Proofpoint
+	"pphosted.com",                // Proofpoint hosted
+	"messagelabs.com",             // Symantec/Broadcom
+	"barracuda.com",               // Barracuda
+	"barracudanetworks.com",       // Barracuda
+	"fastmail.com",                // Fastmail
+	"zoho.com",                    // Zoho Mail
+	"mailhostbox.com",             // MailHostBox
+	"emailsrvr.com",               // Rackspace Email
 }
 
 // MX detects subdomain takeover via a dangling MX record.
@@ -45,7 +45,7 @@ var knownMailProviders = []string{
 //  4. Emit VectorMX findings:
 //     - Confidence=Confirmed when the MX host is NXDOMAIN (definitively dangling).
 //     - Confidence=Potential when the MX hostname matches a known provider suffix
-//       but is not NXDOMAIN (possible zone deletion — further verification needed).
+//     but is not NXDOMAIN (possible zone deletion — further verification needed).
 func MX(ctx context.Context, target string, r *resolver.Resolver) ([]finding.Finding, error) {
 	mxHosts, err := r.MX(ctx, target)
 	if err != nil || len(mxHosts) == 0 {
