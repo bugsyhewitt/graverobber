@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bugsyhewitt/graverobber/pkg/finding"
+	"github.com/bugsyhewitt/graverobber/pkg/nsproviders"
 	"github.com/bugsyhewitt/graverobber/pkg/resolver"
 	"github.com/miekg/dns"
 )
@@ -157,7 +158,7 @@ func runChildNS(conn net.PacketConn, zone, behaviour string) {
 func TestNS_PartialLamePotential(t *testing.T) {
 	const target = "partial.example.com"
 	r, cleanup := nsDelegationServer(t, target, map[string]string{
-		"ns1.live.test":  "live",
+		"ns1.live.test":   "live",
 		"ns2.broken.test": "lame",
 	})
 	defer cleanup()
@@ -198,11 +199,16 @@ func TestNS_PartialLamePotential(t *testing.T) {
 // finding is upgraded to CONFIRMED — re-creating the zone at that provider
 // partially hijacks the delegation.
 func TestNS_PartialLameKnownProviderConfirmed(t *testing.T) {
+	// Pin to the compiled-in default provider list so this test is hermetic
+	// against any stale ns_providers.json cache on the Windows CI runner.
+	SetProviders(nsproviders.Default())
+	defer SetProviders(nil)
+
 	const target = "partial-hijack.example.com"
 	// "awsdns" is a known-vulnerable provider suffix in the default
 	// indianajson snapshot used by the NS detector.
 	r, cleanup := nsDelegationServer(t, target, map[string]string{
-		"ns1.live.test":              "live",
+		"ns1.live.test":         "live",
 		"ns-1234.awsdns-12.org": "lame",
 	})
 	defer cleanup()
@@ -298,7 +304,7 @@ func TestNS_TransportErrorIsNotLame(t *testing.T) {
 	// performs its retry sequence on the unreachable nameserver.
 	const target = "flaky.example.com"
 	r, cleanup := nsDelegationServer(t, target, map[string]string{
-		"ns1.live.test":      "live",
+		"ns1.live.test":        "live",
 		"ns2.unreachable.test": "unknown",
 	})
 	defer cleanup()
@@ -362,6 +368,11 @@ func TestNS_NoDelegationNoFinding(t *testing.T) {
 // the partial-lame sub-case. The default provider list ships with awsdns
 // among its suffixes; an unknown registrar must not match.
 func TestMatchProviderInList(t *testing.T) {
+	// Pin to the compiled-in default provider list so this test is hermetic
+	// against any stale ns_providers.json cache on the Windows CI runner.
+	SetProviders(nsproviders.Default())
+	defer SetProviders(nil)
+
 	cases := []struct {
 		ns        []string
 		wantMatch bool
