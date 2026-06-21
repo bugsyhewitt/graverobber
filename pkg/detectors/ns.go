@@ -207,4 +207,3 @@ func matchNSProvider(nameservers []string) string {
 	}
 	return ""
 }
-
