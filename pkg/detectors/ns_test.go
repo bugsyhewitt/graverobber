@@ -157,7 +157,7 @@ func runChildNS(conn net.PacketConn, zone, behaviour string) {
 func TestNS_PartialLamePotential(t *testing.T) {
 	const target = "partial.example.com"
 	r, cleanup := nsDelegationServer(t, target, map[string]string{
-		"ns1.live.test":  "live",
+		"ns1.live.test":   "live",
 		"ns2.broken.test": "lame",
 	})
 	defer cleanup()
@@ -202,7 +202,7 @@ func TestNS_PartialLameKnownProviderConfirmed(t *testing.T) {
 	// "awsdns" is a known-vulnerable provider suffix in the default
 	// indianajson snapshot used by the NS detector.
 	r, cleanup := nsDelegationServer(t, target, map[string]string{
-		"ns1.live.test":              "live",
+		"ns1.live.test":         "live",
 		"ns-1234.awsdns-12.org": "lame",
 	})
 	defer cleanup()
@@ -298,7 +298,7 @@ func TestNS_TransportErrorIsNotLame(t *testing.T) {
 	// performs its retry sequence on the unreachable nameserver.
 	const target = "flaky.example.com"
 	r, cleanup := nsDelegationServer(t, target, map[string]string{
-		"ns1.live.test":      "live",
+		"ns1.live.test":        "live",
 		"ns2.unreachable.test": "unknown",
 	})
 	defer cleanup()

@@ -1051,7 +1051,7 @@ func TestDSAlgorithms_ReturnsAlgoAndDigest(t *testing.T) {
 		Algorithm  uint8
 		DigestType uint8
 	}{
-		{KeyTag: 1111, Algorithm: 5, DigestType: 1}, // RSASHA1 + SHA-1 — both weak
+		{KeyTag: 1111, Algorithm: 5, DigestType: 1},  // RSASHA1 + SHA-1 — both weak
 		{KeyTag: 2222, Algorithm: 13, DigestType: 2}, // ECDSA + SHA-256 — both safe
 	}, []uint8{13}, dns.RcodeSuccess)
 
