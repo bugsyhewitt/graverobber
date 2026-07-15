@@ -158,20 +158,26 @@ func DMARC(ctx context.Context, target string, r *resolver.Resolver) ([]finding.
 	return findings, nil
 }
 
-// dmarcPolicy returns the lower-cased value of the p= tag from a DMARC record,
-// or "" when no p= tag is present. The match is case-insensitive on the tag name
-// and value (RFC 7489 tags are case-insensitive in practice). Only the top-level
-// p= is read; dmarcSubdomainPolicy handles the sp= tag separately.
-func dmarcPolicy(record string) string {
-	for _, tag := range strings.Split(record, ";") {
-		tag = strings.TrimSpace(tag)
-		lower := strings.ToLower(tag)
-		if v, ok := strings.CutPrefix(lower, "p="); ok {
+// dmarcTagValue returns the lower-cased value of the named tag (e.g. "p" or
+// "sp") from a semicolon-separated DMARC record, or "" when the tag is absent.
+// The match is case-insensitive on both the tag name and value (RFC 7489 tags
+// are case-insensitive in practice).
+func dmarcTagValue(record, tag string) string {
+	prefix := tag + "="
+	for _, t := range strings.Split(record, ";") {
+		t = strings.TrimSpace(t)
+		lower := strings.ToLower(t)
+		if v, ok := strings.CutPrefix(lower, prefix); ok {
 			return strings.TrimSpace(v)
 		}
 	}
 	return ""
 }
+
+// dmarcPolicy returns the lower-cased value of the p= tag from a DMARC record,
+// or "" when no p= tag is present. Only the top-level p= is read;
+// dmarcSubdomainPolicy handles the sp= tag separately.
+func dmarcPolicy(record string) string { return dmarcTagValue(record, "p") }
 
 // dmarcSubdomainPolicy returns the lower-cased value of the sp= tag from a
 // DMARC record, or "" when no sp= tag is present. RFC 7489 §6.3 defines sp=
@@ -180,16 +186,7 @@ func dmarcPolicy(record string) string {
 // When sp=none is explicit, every subdomain is monitor-only regardless of the
 // parent p= value — which is the "split enforcement" misconfiguration this
 // helper is used to detect.
-func dmarcSubdomainPolicy(record string) string {
-	for _, tag := range strings.Split(record, ";") {
-		tag = strings.TrimSpace(tag)
-		lower := strings.ToLower(tag)
-		if v, ok := strings.CutPrefix(lower, "sp="); ok {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
-}
+func dmarcSubdomainPolicy(record string) string { return dmarcTagValue(record, "sp") }
 
 // extractDMARC returns the first TXT record that is a DMARC policy. Per RFC 7489
 // §6.1 a DMARC record begins with "v=DMARC1" (case-insensitive on the version

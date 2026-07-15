@@ -114,6 +114,8 @@ func DKIM(ctx context.Context, target string, r *resolver.Resolver, selectors []
 		selectors = DefaultDKIMSelectors
 	}
 
+	now := nowFn() // hoist: time.Now() once for the whole selector sweep
+
 	var findings []finding.Finding
 	seen := map[string]bool{} // deduplicate selectors within a single target
 
@@ -148,7 +150,7 @@ func DKIM(ctx context.Context, target string, r *resolver.Resolver, selectors []
 			// the published key has been live under the same selector across
 			// the entire stale window. Fire the rotation-hint check, then move
 			// on (no inline-key check applies to a CNAME-delegated selector).
-			if year, stale := staleSelectorYear(sel, nowFn()); stale {
+			if year, stale := staleSelectorYear(sel, now); stale {
 				findings = append(findings, staleDKIMFinding(host, sel, year))
 			}
 			continue
@@ -178,7 +180,7 @@ func DKIM(ctx context.Context, target string, r *resolver.Resolver, selectors []
 		}
 		// Rotation-hint fires independently of weak-key: a healthy 2048-bit
 		// key under a stale-named selector is still a stale key.
-		if year, stale := staleSelectorYear(sel, nowFn()); stale {
+		if year, stale := staleSelectorYear(sel, now); stale {
 			findings = append(findings, staleDKIMFinding(host, sel, year))
 		}
 	}
