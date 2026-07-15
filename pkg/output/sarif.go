@@ -312,9 +312,12 @@ func sarifMessage(f finding.Finding) string {
 			detail = "CAA authorises any CA (permissive)"
 		}
 	case finding.VectorTLSA:
-		if len(f.MXHosts) > 0 {
+		switch {
+		case len(f.MXHosts) > 0:
 			detail = fmt.Sprintf("DANE TLSA %s pins %s which is NXDOMAIN (dangling pin)", f.TLSAName, f.MXHosts[0])
-		} else {
+		case f.Scheme == "https":
+			detail = fmt.Sprintf("DANE TLSA %s does not match served HTTPS certificate (broken pin — cert mismatch)", f.TLSAName)
+		default:
 			detail = "DANE TLSA " + f.TLSAName + " dangling pin"
 		}
 	case finding.VectorMTASTS:

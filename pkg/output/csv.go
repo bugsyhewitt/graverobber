@@ -156,16 +156,15 @@ func csvTarget(f finding.Finding) string {
 	case finding.VectorTLSA:
 		// The dangling DANE pin's owner name plus the gone mail host it covers
 		// are the actionable target. The HTTPS validation sub-case has no MX
-		// host and is keyed solely on the (_443._tcp.) pin owner name.
-		if len(f.MXHosts) > 0 {
+		// host; its Scheme field is "https".
+		switch {
+		case len(f.MXHosts) > 0:
 			return fmt.Sprintf("%s -> %s (NXDOMAIN)", f.TLSAName, f.MXHosts[0])
-		}
-		// _443._tcp. is the DANE-for-HTTPS owner-name prefix (RFC 7671 §3); a
-		// finding with that prefix and no MX host is the cert-mismatch sub-case.
-		if strings.HasPrefix(f.TLSAName, "_443._tcp.") {
+		case f.Scheme == "https":
 			return fmt.Sprintf("%s (cert mismatch)", f.TLSAName)
+		default:
+			return f.TLSAName
 		}
-		return f.TLSAName
 	case finding.VectorMTASTS:
 		// Sub-case 2 (weak mode): the policy host is up but the mode is not enforce.
 		if f.MTASTSMode != "" {
