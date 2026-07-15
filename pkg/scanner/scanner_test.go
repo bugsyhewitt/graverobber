@@ -96,14 +96,21 @@ func TestRun_TerminatesWithEmptyDB(t *testing.T) {
 		t.Fatalf("load empty db: %v", err)
 	}
 	sc := New(db, Options{
-		Concurrency: 2,
-		Timeout:     500 * time.Millisecond,
-		NoNS:        true,
-		NoSPF:       true,
-		NoMX:        true,
-		NoDKIM:      true,
-		NoDMARC:     true,
-		NoAXFR:      true,
+		Concurrency:    2,
+		Timeout:        500 * time.Millisecond,
+		NoNS:           true,
+		NoSPF:          true,
+		NoMX:           true,
+		NoDKIM:         true,
+		NoDMARC:        true,
+		NoAXFR:         true,
+		NoCAA:          true,
+		NoTLSA:         true,
+		NoMTASTS:       true,
+		NoBIMI:         true,
+		NoDNSSEC:       true,
+		NoTLSRPT:       true,
+		NoAutodiscover: true,
 	})
 
 	targets := make(chan string, 3)
@@ -169,11 +176,25 @@ func TestRun_VectorsRunConcurrently(t *testing.T) {
 		t.Fatalf("load db: %v", err)
 	}
 	// Single worker, single target: any concurrency observed must come from the
-	// per-target vector fan-out, not from multiple workers or targets. MX,
-	// DKIM, DMARC, and AXFR are disabled so the timing measures only the three
-	// stubbed vectors (the real detectors would otherwise hit DNS and skew the
-	// clock).
-	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true, NoDMARC: true, NoAXFR: true})
+	// per-target vector fan-out, not from multiple workers or targets. All
+	// vectors except the three stubs are disabled so the timing measures only
+	// the three stubbed vectors (the real detectors would otherwise hit DNS or
+	// HTTP and skew the clock).
+	sc := New(db, Options{
+		Concurrency:    1,
+		Timeout:        time.Second,
+		NoMX:           true,
+		NoDKIM:         true,
+		NoDMARC:        true,
+		NoAXFR:         true,
+		NoCAA:          true,
+		NoTLSA:         true,
+		NoMTASTS:       true,
+		NoBIMI:         true,
+		NoDNSSEC:       true,
+		NoTLSRPT:       true,
+		NoAutodiscover: true,
+	})
 
 	targets := make(chan string, 1)
 	targets <- "sub.example.com"
@@ -229,7 +250,23 @@ func TestRun_DisabledVectorsAreNotRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load db: %v", err)
 	}
-	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoNS: true, NoSPF: true, NoMX: true, NoDKIM: true, NoDMARC: true, NoAXFR: true})
+	sc := New(db, Options{
+		Concurrency:    1,
+		Timeout:        time.Second,
+		NoNS:           true,
+		NoSPF:          true,
+		NoMX:           true,
+		NoDKIM:         true,
+		NoDMARC:        true,
+		NoAXFR:         true,
+		NoCAA:          true,
+		NoTLSA:         true,
+		NoMTASTS:       true,
+		NoBIMI:         true,
+		NoDNSSEC:       true,
+		NoTLSRPT:       true,
+		NoAutodiscover: true,
+	})
 
 	targets := make(chan string, 1)
 	targets <- "sub.example.com"
@@ -273,8 +310,23 @@ func TestRun_AllVectorFindingsAreEmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load db: %v", err)
 	}
-	// Disable MX/DKIM/DMARC/AXFR so the emitted set is exactly the three stubbed vectors.
-	sc := New(db, Options{Concurrency: 1, Timeout: time.Second, NoMX: true, NoDKIM: true, NoDMARC: true, NoAXFR: true})
+	// Disable all non-stubbed vectors so the emitted set is exactly the three
+	// stubbed vectors (CNAME, NS, SPF).
+	sc := New(db, Options{
+		Concurrency:    1,
+		Timeout:        time.Second,
+		NoMX:           true,
+		NoDKIM:         true,
+		NoDMARC:        true,
+		NoAXFR:         true,
+		NoCAA:          true,
+		NoTLSA:         true,
+		NoMTASTS:       true,
+		NoBIMI:         true,
+		NoDNSSEC:       true,
+		NoTLSRPT:       true,
+		NoAutodiscover: true,
+	})
 
 	targets := make(chan string, 1)
 	targets <- "sub.example.com"
@@ -319,14 +371,21 @@ func TestRun_NoMXDisablesMXVector(t *testing.T) {
 	runWith := func(noMX bool) int32 {
 		atomic.StoreInt32(&mxCalls, 0)
 		sc := New(db, Options{
-			Concurrency: 1,
-			Timeout:     200 * time.Millisecond,
-			NoNS:        true,
-			NoSPF:       true,
-			NoMX:        noMX,
-			NoDKIM:      true,
-			NoDMARC:     true,
-			NoAXFR:      true,
+			Concurrency:    1,
+			Timeout:        200 * time.Millisecond,
+			NoNS:           true,
+			NoSPF:          true,
+			NoMX:           noMX,
+			NoDKIM:         true,
+			NoDMARC:        true,
+			NoAXFR:         true,
+			NoCAA:          true,
+			NoTLSA:         true,
+			NoMTASTS:       true,
+			NoBIMI:         true,
+			NoDNSSEC:       true,
+			NoTLSRPT:       true,
+			NoAutodiscover: true,
 		})
 		targets := make(chan string, 1)
 		targets <- "sub.example.com"
@@ -367,14 +426,21 @@ func TestRun_NoDKIMDisablesDKIMVector(t *testing.T) {
 	runWith := func(noDKIM bool) int32 {
 		atomic.StoreInt32(&dkimCalls, 0)
 		sc := New(db, Options{
-			Concurrency: 1,
-			Timeout:     200 * time.Millisecond,
-			NoNS:        true,
-			NoSPF:       true,
-			NoMX:        true,
-			NoDKIM:      noDKIM,
-			NoDMARC:     true,
-			NoAXFR:      true,
+			Concurrency:    1,
+			Timeout:        200 * time.Millisecond,
+			NoNS:           true,
+			NoSPF:          true,
+			NoMX:           true,
+			NoDKIM:         noDKIM,
+			NoDMARC:        true,
+			NoAXFR:         true,
+			NoCAA:          true,
+			NoTLSA:         true,
+			NoMTASTS:       true,
+			NoBIMI:         true,
+			NoDNSSEC:       true,
+			NoTLSRPT:       true,
+			NoAutodiscover: true,
 		})
 		targets := make(chan string, 1)
 		targets <- "sub.example.com"
@@ -415,14 +481,21 @@ func TestRun_NoDMARCDisablesDMARCVector(t *testing.T) {
 	runWith := func(noDMARC bool) int32 {
 		atomic.StoreInt32(&dmarcCalls, 0)
 		sc := New(db, Options{
-			Concurrency: 1,
-			Timeout:     200 * time.Millisecond,
-			NoNS:        true,
-			NoSPF:       true,
-			NoMX:        true,
-			NoDKIM:      true,
-			NoDMARC:     noDMARC,
-			NoAXFR:      true,
+			Concurrency:    1,
+			Timeout:        200 * time.Millisecond,
+			NoNS:           true,
+			NoSPF:          true,
+			NoMX:           true,
+			NoDKIM:         true,
+			NoDMARC:        noDMARC,
+			NoAXFR:         true,
+			NoCAA:          true,
+			NoTLSA:         true,
+			NoMTASTS:       true,
+			NoBIMI:         true,
+			NoDNSSEC:       true,
+			NoTLSRPT:       true,
+			NoAutodiscover: true,
 		})
 		targets := make(chan string, 1)
 		targets <- "sub.example.com"
@@ -463,14 +536,21 @@ func TestRun_NoAXFRDisablesAXFRVector(t *testing.T) {
 	runWith := func(noAXFR bool) int32 {
 		atomic.StoreInt32(&axfrCalls, 0)
 		sc := New(db, Options{
-			Concurrency: 1,
-			Timeout:     200 * time.Millisecond,
-			NoNS:        true,
-			NoSPF:       true,
-			NoMX:        true,
-			NoDKIM:      true,
-			NoDMARC:     true,
-			NoAXFR:      noAXFR,
+			Concurrency:    1,
+			Timeout:        200 * time.Millisecond,
+			NoNS:           true,
+			NoSPF:          true,
+			NoMX:           true,
+			NoDKIM:         true,
+			NoDMARC:        true,
+			NoAXFR:         noAXFR,
+			NoCAA:          true,
+			NoTLSA:         true,
+			NoMTASTS:       true,
+			NoBIMI:         true,
+			NoDNSSEC:       true,
+			NoTLSRPT:       true,
+			NoAutodiscover: true,
 		})
 		targets := make(chan string, 1)
 		targets <- "sub.example.com"
@@ -511,15 +591,21 @@ func TestRun_NoCAADisablesCAAVector(t *testing.T) {
 	runWith := func(noCAA bool) int32 {
 		atomic.StoreInt32(&caaCalls, 0)
 		sc := New(db, Options{
-			Concurrency: 1,
-			Timeout:     200 * time.Millisecond,
-			NoNS:        true,
-			NoSPF:       true,
-			NoMX:        true,
-			NoDKIM:      true,
-			NoDMARC:     true,
-			NoAXFR:      true,
-			NoCAA:       noCAA,
+			Concurrency:    1,
+			Timeout:        200 * time.Millisecond,
+			NoNS:           true,
+			NoSPF:          true,
+			NoMX:           true,
+			NoDKIM:         true,
+			NoDMARC:        true,
+			NoAXFR:         true,
+			NoCAA:          noCAA,
+			NoTLSA:         true,
+			NoMTASTS:       true,
+			NoBIMI:         true,
+			NoDNSSEC:       true,
+			NoTLSRPT:       true,
+			NoAutodiscover: true,
 		})
 		targets := make(chan string, 1)
 		targets <- "sub.example.com"
@@ -561,20 +647,21 @@ func TestRun_NoTLSRPTDisablesTLSRPTVector(t *testing.T) {
 	runWith := func(noTLSRPT bool) int32 {
 		atomic.StoreInt32(&tlsRptCalls, 0)
 		sc := New(db, Options{
-			Concurrency: 1,
-			Timeout:     200 * time.Millisecond,
-			NoNS:        true,
-			NoSPF:       true,
-			NoMX:        true,
-			NoDKIM:      true,
-			NoDMARC:     true,
-			NoAXFR:      true,
-			NoCAA:       true,
-			NoTLSA:      true,
-			NoMTASTS:    true,
-			NoBIMI:      true,
-			NoDNSSEC:    true,
-			NoTLSRPT:    noTLSRPT,
+			Concurrency:    1,
+			Timeout:        200 * time.Millisecond,
+			NoNS:           true,
+			NoSPF:          true,
+			NoMX:           true,
+			NoDKIM:         true,
+			NoDMARC:        true,
+			NoAXFR:         true,
+			NoCAA:          true,
+			NoTLSA:         true,
+			NoMTASTS:       true,
+			NoBIMI:         true,
+			NoDNSSEC:       true,
+			NoTLSRPT:       noTLSRPT,
+			NoAutodiscover: true,
 		})
 		targets := make(chan string, 1)
 		targets <- "sub.example.com"
@@ -620,15 +707,22 @@ func TestRun_MinConfidenceFiltersWeakerFindings(t *testing.T) {
 
 	run := func(min finding.Confidence) map[finding.Confidence]int {
 		sc := New(db, Options{
-			Concurrency:   1,
-			Timeout:       time.Second,
-			NoNS:          true,
-			NoSPF:         true,
-			NoMX:          true,
-			NoDKIM:        true,
-			NoDMARC:       true,
-			NoAXFR:        true,
-			MinConfidence: min,
+			Concurrency:    1,
+			Timeout:        time.Second,
+			NoNS:           true,
+			NoSPF:          true,
+			NoMX:           true,
+			NoDKIM:         true,
+			NoDMARC:        true,
+			NoAXFR:         true,
+			NoCAA:          true,
+			NoTLSA:         true,
+			NoMTASTS:       true,
+			NoBIMI:         true,
+			NoDNSSEC:       true,
+			NoTLSRPT:       true,
+			NoAutodiscover: true,
+			MinConfidence:  min,
 		})
 		targets := make(chan string, 1)
 		targets <- "sub.example.com"
@@ -703,14 +797,21 @@ func TestRun_SecondRunDeduplicationIsIndependentOfFirst(t *testing.T) {
 		t.Fatalf("load db: %v", err)
 	}
 	sc := New(db, Options{
-		Concurrency: 1,
-		Timeout:     200 * time.Millisecond,
-		NoNS:        true,
-		NoSPF:       true,
-		NoMX:        true,
-		NoDKIM:      true,
-		NoDMARC:     true,
-		NoAXFR:      true,
+		Concurrency:    1,
+		Timeout:        200 * time.Millisecond,
+		NoNS:           true,
+		NoSPF:          true,
+		NoMX:           true,
+		NoDKIM:         true,
+		NoDMARC:        true,
+		NoAXFR:         true,
+		NoCAA:          true,
+		NoTLSA:         true,
+		NoMTASTS:       true,
+		NoBIMI:         true,
+		NoDNSSEC:       true,
+		NoTLSRPT:       true,
+		NoAutodiscover: true,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
