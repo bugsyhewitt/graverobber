@@ -1,5 +1,9 @@
 # graverobber
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bugsyhewitt/bugsyhewitt.github.io/main/public/cards/graverobber.jpg" alt="graverobber" width="680">
+</p>
+
 **Subdomain takeover scanner for CNAME, NS, SPF, MX, DKIM, and DMARC dangling records, plus AXFR zone-transfer, CAA misconfiguration, dangling DANE TLSA pins, dangling MTA-STS policy hosts, dangling BIMI asset hosts, orphaned DNSSEC DS records, and dangling TLSRPT report destinations.**
 
 > Digs up the subdomains your target left for dead — CNAME, NS, SPF, MX, DKIM,
