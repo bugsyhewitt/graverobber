@@ -32,6 +32,7 @@ a recon pipeline.
 | BIMI | A BIMI record (`v=BIMI1` TXT at `default._bimi.<domain>`) names a logo (`l=`) or VMC (`a=`) URL whose host is NXDOMAIN and re-claimable | Reclaimed asset host serves a forged brand logo/VMC, displayed beside DMARC-passing mail → brand-impersonation phishing (BIMI spec) |
 | DNSSEC | The parent zone publishes a `DS` (Delegation Signer) record but the domain has **no `DNSKEY`** — an orphaned DS that breaks the chain of trust; **or** the chain is intact but uses a DNSSEC algorithm RFC 8624 forbids/deprecates (RSAMD5, DSA/SHA-1, RSASHA1, DSA-NSEC3-SHA1, RSASHA1-NSEC3-SHA1, ECC-GOST, or a SHA-1 DS digest) — a forgeable chain | Orphan: every validating resolver (Google, Cloudflare, Quad9, most ISPs) `SERVFAIL`s the whole zone → self-inflicted outage. Weak algorithm: a well-resourced attacker can forge a valid-looking DNSSEC chain, defeating DNSSEC entirely (RFC 4034, RFC 8624) |
 | TLSRPT | A TLSRPT record (`v=TLSRPTv1` TXT at `_smtp._tls.<domain>`) names a `rua=` report destination — a `mailto:` domain or `https:` collector host — that is NXDOMAIN and re-claimable | Reclaimed destination intercepts every SMTP-TLS failure report → delivery reconnaissance and a live view of the downgrade failures that would otherwise alert the owner (RFC 8460) |
+| Autodiscover | `autodiscover.<domain>` (MS Exchange/Outlook) or `autoconfig.<domain>` (Thunderbird and general convention) is published as a CNAME that resolves to NXDOMAIN, and the apex domain is live | Mail clients auto-probe these hosts during account setup; an attacker who reclaims the gone CNAME target serves a forged autoconfiguration payload that silently hands every auto-probing client an attacker-controlled IMAP/SMTP server and harvests mailbox credentials |
 
 Most scanners cover CNAME only. NS, SPF, MX, DKIM, and DMARC takeover are live,
 actively-exploited vectors that almost no Go tool handles. Together SPF, DKIM,
@@ -109,7 +110,7 @@ graverobber -l subs.txt --fingerprints ~/private.json
 graverobber -l subs.txt --offline
 
 # Skip vectors
-graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa --no-mtasts --no-bimi --no-dnssec --no-tlsrpt
+graverobber -l subs.txt --no-ns --no-spf --no-mx --no-dkim --no-dmarc --no-axfr --no-caa --no-tlsa --no-mtasts --no-bimi --no-dnssec --no-tlsrpt --no-autodiscover
 
 # Probe a custom set of DKIM selectors instead of the built-in ESP defaults
 graverobber -l subs.txt --selectors default,google,s1,s2,k1
@@ -266,6 +267,7 @@ targets from `-t`, `-l`, or stdin (same precedence as `scan`).
 | `--no-bimi` | false | Skip BIMI dangling-asset-host checks |
 | `--no-dnssec` | false | Skip DNSSEC checks (orphaned DS, weak/deprecated algorithm per RFC 8624) |
 | `--no-tlsrpt` | false | Skip TLSRPT dangling-report-destination checks |
+| `--no-autodiscover` | false | Skip Autodiscover/Autoconfig dangling mail-client-autoconfiguration-host checks |
 | `--selectors` | — | Comma-separated DKIM selectors to probe (default: common ESP selectors) |
 | `--fingerprints` | — | Additional fingerprint JSON to merge (repeatable) |
 | `--offline` | false | Cached/embedded fingerprints only, no network |
@@ -503,6 +505,20 @@ the SPF `include:` vector; they are distinguished by which of `dmarc_policy` /
 `dmarc_uri` is set. This mirrors the dual-transport handling of the CAA `iodef=`
 and TLSRPT `rua=` report-host vectors.
 
+**3 — Weak subdomain policy (`sp=none`).** RFC 7489 §6.3 defines the optional
+`sp=` tag as an explicit override of the parent `p=` policy for all subdomains.
+When `sp=none` is set and the parent `p=` is `reject` or `quarantine`, the
+subdomain namespace is left monitor-only while the apex is enforced — an attacker
+spoofing from any subdomain (`anything@sub.example.com`) evades DMARC enforcement
+entirely because receivers apply the `sp=none` policy, not the enforcing parent.
+This is the "split enforcement" anti-pattern: the domain owner enforced the apex
+but inadvertently left every subdomain spoofable. graverobber emits a `POTENTIAL`
+`dmarc` finding carrying the subdomain policy token in `dmarc_policy` and calls out
+the parent policy in the evidence so the operator sees exactly the mismatch.
+`p=reject`/`p=quarantine` with an absent `sp=` (subdomains inherit the parent),
+or `sp=reject`/`sp=quarantine`, are never flagged — only the explicit mismatch
+where the subdomain policy undermines an otherwise-enforcing apex record.
+
 Together with SPF, DKIM, and MX, this completes the email-authentication
 takeover surface.
 
@@ -592,14 +608,32 @@ DANE pin**, and two things go wrong:
   SMTP server presenting a certificate that matches the still-published `TLSA`
   association — and be trusted by every DANE sender.
 
-graverobber resolves the target's `MX` records, probes `_25._tcp.<mxhost>` for a
-`TLSA` pin, and — if a pin exists — checks whether that mail host is NXDOMAIN. A
-dangling pin is reported as a `POTENTIAL` `tlsa` finding carrying the DANE owner
-name in `tlsa_name` and the dangling mail host in `mx_hosts`. A domain with no
-`TLSA` records, or whose pinned hosts all resolve, is the healthy case and is
-intentionally **not** flagged — only a present-but-orphaned pin is reported,
-keeping the vector low-noise. (A dangling MX host with *no* DANE pin is reported
-by the MX vector instead, not here.)
+graverobber detects two sub-cases under the TLSA vector:
+
+**Sub-case 1 — Dangling SMTP pin.** graverobber resolves the target's `MX`
+records, probes `_25._tcp.<mxhost>` for a `TLSA` pin, and — if a pin exists —
+checks whether that mail host is NXDOMAIN. A dangling pin is reported as a
+`POTENTIAL` `tlsa` finding carrying the DANE owner name in `tlsa_name` and the
+dangling mail host in `mx_hosts`. A domain with no `TLSA` records, or whose pinned
+hosts all resolve, is the healthy case and is intentionally **not** flagged — only
+a present-but-orphaned pin is reported, keeping the vector low-noise. (A dangling
+MX host with *no* DANE pin is reported by the MX vector instead, not here.)
+
+**Sub-case 2 — Stale HTTPS pin (cert mismatch).** DANE for HTTPS (RFC 7671) uses
+`_443._tcp.<target>` TLSA records to pin a domain's public TLS certificate. When
+the certificate is rotated (or the operator switches CAs) but the `TLSA` record is
+not updated, the published pin and the live certificate drift out of sync. From the
+standpoint of every DANE-validating client this is a hard TLS failure (RFC 7671 §5:
+a published-but-unmatchable pin breaks the connection). graverobber queries
+`_443._tcp.<target>` for TLSA records; if any are present it performs a TLS
+handshake (with `InsecureSkipVerify` — to read the certificate bytes, not to
+chain-validate against the public PKI) and runs the RFC 7671 §5.1 matching
+algorithm against the served certificate chain. If **no** published record matches
+the served certificate, graverobber emits a `POTENTIAL` `tlsa` finding carrying the
+DANE owner name in `tlsa_name` and the observed leaf SPKI SHA-256 fingerprint in
+the evidence (the value to copy into a corrected TLSA record). A handshake failure
+(connection refused, timeout, TLS error) is treated as indeterminate and produces
+no finding — the detector is biased toward false negatives over false positives.
 
 ### MTA-STS misconfiguration (`--no-mtasts`)
 
@@ -807,6 +841,46 @@ host are deduplicated to one finding). A domain that does not advertise TLSRPT, 
 whose report destinations all resolve, is the healthy case and is intentionally
 **not** flagged, keeping the vector low-noise.
 
+### Dangling mail-client autoconfiguration host (`--no-autodiscover`)
+
+Mail clients configure themselves automatically by fetching server settings from
+well-known subdomains of the user's email domain — **without any user action**:
+
+- `autodiscover.<domain>` — the Microsoft Exchange / Outlook Autodiscover
+  endpoint (MS-OXDSCLI). Outlook and the ActiveSync clients on every major mobile
+  platform probe `https://autodiscover.<domain>/autodiscover/autodiscover.xml`
+  during account setup. Microsoft 365 tenants publish it as a CNAME to
+  `autodiscover.outlook.com` (or a third-party mail host).
+- `autoconfig.<domain>` — the Mozilla Thunderbird autoconfiguration endpoint and
+  the de-facto cross-client convention. Clients probe
+  `https://autoconfig.<domain>/mail/config-v1.1.xml` during setup. Likewise
+  typically a CNAME to a mail-hosting provider.
+
+These hosts cover the **autoconfiguration plane** that the CNAME fingerprint, NS,
+SPF, DKIM, DMARC, MX, MTA-STS, TLSRPT, and BIMI vectors do not — none of them
+probe the host a mail client auto-resolves to fetch its server settings.
+
+When an organisation migrates off a hosted mail tenant — the Microsoft 365 tenant
+is closed, the third-party mail host is decommissioned, the hosted zone is deleted
+— but the autodiscover/autoconfig CNAME is left behind, the host becomes a
+**dangling mail-client autoconfiguration host**: a takeover vector uniquely
+dangerous because exploitation is automatic and user-silent. An attacker who
+reclaims the gone CNAME target serves a forged autoconfiguration payload; because
+the client fetches it automatically and trusts it to configure the account, the
+attacker hands every auto-probing mail client an attacker-controlled IMAP/SMTP
+server and prompts the user's mailbox credentials — a silent, high-yield
+credential-harvesting and mail-interception path.
+
+graverobber confirms the apex domain is live first (a NXDOMAIN apex is a dead
+domain, not an autoconfiguration-host takeover — no live organisation's mail
+clients would auto-probe it), then probes `autodiscover.<target>` and
+`autoconfig.<target>`. If either is NXDOMAIN, graverobber emits a `POTENTIAL`
+`autodiscover` finding keyed on the target, carrying the dangling host in `service`
+and the claimable CNAME target (or the host itself) in `cname`. A domain whose
+autoconfiguration hosts resolve, or that publishes neither, is the healthy case and
+is intentionally **not** flagged, keeping the vector low-noise and
+pipeline-friendly.
+
 ---
 
 ## Confidence model
@@ -845,21 +919,25 @@ JSONL — one finding per line:
 
 Without `--json`, findings render as one coloured human-readable line per
 finding. Each line carries the confidence tier, the vector tag, the subdomain,
-and a vector-specific detail: the dangling CNAME target (`cname`), the claimable
-`include:`/`redirect=` domain, the permissive `+all` mechanism, or the
-DNS-lookup count when it exceeds the RFC 7208 §4.6.4 cap of ten (`spf`), the
-failed nameservers (`ns`), the dangling
-mail-exchanger hosts (`mx`), the dangling `<selector>._domainkey` delegation,
-weak inline RSA key size, or stale-year rotation-hint (`dkim`), the claimable `rua`/`ruf` report host
-(`dmarc`), the leaking
-nameserver and leaked-host count (`axfr`), the orphaned `DS` key tags
-(`dnssec`), or the dangling TLSRPT report host (`tlsrpt`). ANSI colour is emitted only to a TTY;
+and a vector-specific detail: the dangling CNAME target (`cname`); the claimable
+`include:`/`redirect=`/`a:`/`mx:` domain, the permissive `+all` mechanism, the
+DNS-lookup count exceeding the RFC 7208 §4.6.4 cap, or the deprecated `ptr` token
+(`spf`); the failed nameservers (`ns`); the dangling mail-exchanger hosts (`mx`);
+the dangling `<selector>._domainkey` delegation, weak inline RSA key size, or
+stale-year rotation-hint (`dkim`); the claimable `rua`/`ruf` report host or the
+`p=none`/`sp=none` policy token (`dmarc`); the leaking nameserver and
+leaked-host count (`axfr`); the claimable CA issuer, `iodef` report host, or
+permissive `*` flag (`caa`); the dangling DANE owner name or stale-pin SPKI
+fingerprint (`tlsa`); the dangling policy host or weak mode token (`mtasts`);
+the dangling asset host (`bimi`); the orphaned `DS` key tags or weak algorithm
+names (`dnssec`); the dangling TLSRPT report host (`tlsrpt`); or the dangling
+autoconfiguration host (`autodiscover`). ANSI colour is emitted only to a TTY;
 piped or file output is plain text.
 
 When the scan finishes, the human-readable mode closes with a triage summary on
 stderr: the total count, then a breakdown by confidence tier (strongest first)
 and by vector (pipeline order). The by-vector breakdown covers every vector the
-scanner can emit (`cname`, `ns`, `spf`, `mx`, `dkim`, `dmarc`, `axfr`, `caa`, `tlsa`, `mtasts`, `bimi`, `dnssec`), so
+scanner can emit (`cname`, `ns`, `spf`, `mx`, `dkim`, `dmarc`, `axfr`, `caa`, `tlsa`, `mtasts`, `bimi`, `dnssec`, `tlsrpt`, `autodiscover`), so
 the per-vector counts always reconcile with the total. Only the tiers and vectors
 that actually occurred are listed, so a single-vector scan stays uncluttered:
 
